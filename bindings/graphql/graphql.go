@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -24,12 +25,12 @@ import (
 	graphql "github.com/machinebox/graphql"
 
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 const (
-	// configurations to connect to GraphQL.
-	connectionEndPointKey = "endpoint"
 
 	// keys from request's metadata.
 	commandQuery    = "query"
@@ -45,6 +46,10 @@ const (
 	MutationOperation bindings.OperationKind = "mutation"
 )
 
+type graphQLMetadata struct {
+	Endpoint string `mapstructure:"endpoint"`
+}
+
 // GraphQL represents GraphQL output bindings.
 type GraphQL struct {
 	client *graphql.Client
@@ -52,29 +57,31 @@ type GraphQL struct {
 	logger logger.Logger
 }
 
-var _ = bindings.OutputBinding(&GraphQL{})
-
 // NewGraphQL returns a new GraphQL binding instance.
-func NewGraphQL(logger logger.Logger) *GraphQL {
+func NewGraphQL(logger logger.Logger) bindings.OutputBinding {
 	return &GraphQL{logger: logger}
 }
 
 // Init initializes the GraphQL binding.
-func (gql *GraphQL) Init(metadata bindings.Metadata) error {
+func (gql *GraphQL) Init(_ context.Context, meta bindings.Metadata) error {
 	gql.logger.Debug("GraphQL Error: Initializing GraphQL binding")
 
-	p := metadata.Properties
-	ep, ok := p[connectionEndPointKey]
-	if !ok || ep == "" {
+	m := graphQLMetadata{}
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
+	if err != nil {
+		return err
+	}
+
+	if m.Endpoint == "" {
 		return fmt.Errorf("GraphQL Error: Missing GraphQL URL")
 	}
 
 	// Connect to GraphQL Server
-	client := graphql.NewClient(ep)
+	client := graphql.NewClient(m.Endpoint)
 
 	gql.client = client
 	gql.header = make(map[string]string)
-	for k, v := range p {
+	for k, v := range meta.Properties {
 		if strings.HasPrefix(k, "header:") {
 			gql.header[strings.TrimPrefix(k, "header:")] = v
 		}
@@ -102,7 +109,7 @@ func (gql *GraphQL) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*b
 	}
 	gql.logger.Debugf("operation: %v", req.Operation)
 
-	startTime := time.Now().UTC()
+	startTime := time.Now()
 
 	resp := &bindings.InvokeResponse{
 		Metadata: map[string]string{
@@ -114,14 +121,14 @@ func (gql *GraphQL) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*b
 
 	var graphqlResponse interface{}
 
-	switch req.Operation { // nolint: exhaustive
+	switch req.Operation { //nolint:exhaustive
 	case QueryOperation:
-		if err := gql.runRequest(commandQuery, req, &graphqlResponse); err != nil {
+		if err := gql.runRequest(ctx, commandQuery, req, &graphqlResponse); err != nil {
 			return nil, err
 		}
 
 	case MutationOperation:
-		if err := gql.runRequest(commandMutation, req, &graphqlResponse); err != nil {
+		if err := gql.runRequest(ctx, commandMutation, req, &graphqlResponse); err != nil {
 			return nil, err
 		}
 
@@ -137,14 +144,14 @@ func (gql *GraphQL) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*b
 
 	resp.Data = b
 
-	endTime := time.Now().UTC()
+	endTime := time.Now()
 	resp.Metadata[respEndTimeKey] = endTime.Format(time.RFC3339Nano)
 	resp.Metadata[respDurationKey] = endTime.Sub(startTime).String()
 
 	return resp, nil
 }
 
-func (gql *GraphQL) runRequest(requestKey string, req *bindings.InvokeRequest, response interface{}) error {
+func (gql *GraphQL) runRequest(ctx context.Context, requestKey string, req *bindings.InvokeRequest, response interface{}) error {
 	requestString, ok := req.Metadata[requestKey]
 	if !ok || requestString == "" {
 		return fmt.Errorf("GraphQL Error: required %q not set", requestKey)
@@ -167,12 +174,21 @@ func (gql *GraphQL) runRequest(requestKey string, req *bindings.InvokeRequest, r
 	for k, v := range req.Metadata {
 		if strings.HasPrefix(k, "header:") {
 			request.Header.Set(strings.TrimPrefix(k, "header:"), v)
+		} else if strings.HasPrefix(k, "variable:") {
+			request.Var(strings.TrimPrefix(k, "variable:"), v)
 		}
 	}
 
-	if err := gql.client.Run(context.Background(), request, response); err != nil {
+	if err := gql.client.Run(ctx, request, response); err != nil {
 		return fmt.Errorf("GraphQL Error: %w", err)
 	}
 
 	return nil
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (gql *GraphQL) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := graphQLMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.BindingType)
+	return
 }

@@ -16,18 +16,26 @@ param rgLocation string = resourceGroup().location
 param confTestTags object = {}
 
 var eventHubsNamespacePolicy = '${eventHubsNamespaceName}-namespace-policy'
-var eventHubBindingsName = '${eventHubsNamespaceName}-bindings-topic'
+var eventHubBindingsName = 'eventhubs-bindings-topic'
 var eventHubBindingsPolicyName = '${eventHubBindingsName}-policy'
 var eventHubBindingsConsumerGroupName = '${eventHubBindingsName}-cg'
 
-var eventHubPubsubName = '${eventHubsNamespaceName}-pubsub-topic'
+var eventHubPubsubName = 'eventhubs-pubsub-topic'
 var eventHubPubsubPolicyName = '${eventHubPubsubName}-policy'
 var eventHubPubsubConsumerGroupName = '${eventHubPubsubName}-cg'
+
+var eventHubBulkPubsubName = 'eventhubs-pubsub-topic-bulk'
+var eventHubBulkPubsubPolicyName = '${eventHubBulkPubsubName}-policy'
 
 var certificationEventHubPubsubTopicActiveName = 'certification-pubsub-topic-active'
 var certificationEventHubPubsubTopicActivePolicyName = '${certificationEventHubPubsubTopicActiveName}-policy'
 
 var certificationEventHubPubsubTopicPassiveName = 'certification-pubsub-topic-passive'
+
+var certificationEventHubPubsubTopicMulti1Name = 'certification-pubsub-multi-topic1'
+var certificationEventHubPubsubTopicMulti2Name = 'certification-pubsub-multi-topic2'
+var certificationEventHubPubsubTopicMulti1PolicyName = '${certificationEventHubPubsubTopicMulti1Name}-policy'
+var certificationEventHubPubsubTopicMulti2PolicyName = '${certificationEventHubPubsubTopicMulti2Name}-policy'
 
 var certificationConsumerGroupName1 = 'ehcertification1'
 var certificationConsumerGroupName2 = 'ehcertification2'
@@ -66,6 +74,12 @@ resource eventHubsNamespace 'Microsoft.EventHub/namespaces@2017-04-01' = {
     resource eventHubBindingsConsumerGroup 'consumergroups' = {
       name: eventHubBindingsConsumerGroupName
     }
+    resource eventHubBindingsCertificationConsumerGroup1 'consumergroups' = {
+      name: certificationConsumerGroupName1
+    }
+    resource eventHubBindingsCertificationConsumerGroup2 'consumergroups' = {
+      name: certificationConsumerGroupName2
+    }
   }
   resource eventHubPubsub 'eventhubs' = {
     name: eventHubPubsubName
@@ -74,6 +88,24 @@ resource eventHubsNamespace 'Microsoft.EventHub/namespaces@2017-04-01' = {
     }
     resource eventHubPubsubPolicy 'authorizationRules' = {
       name: eventHubPubsubPolicyName
+      properties: {
+        rights: [
+          'Send'
+          'Listen'
+        ]
+      }
+    }
+    resource eventHubPubsubConsumerGroup 'consumergroups' = {
+      name: eventHubPubsubConsumerGroupName
+    }
+  }
+  resource eventHubBulkPubsub 'eventhubs' = {
+    name: eventHubBulkPubsubName
+    properties: {
+      messageRetentionInDays: 1
+    }
+    resource eventHubBulkPubsubPolicy 'authorizationRules' = {
+      name: eventHubBulkPubsubPolicyName
       properties: {
         rights: [
           'Send'
@@ -118,6 +150,42 @@ resource eventHubsNamespace 'Microsoft.EventHub/namespaces@2017-04-01' = {
       name: certificationConsumerGroupName2
     }
   }
+  resource certificationEventHubPubsubTopicMulti1 'eventhubs' = {
+    name: certificationEventHubPubsubTopicMulti1Name
+    properties: {
+      messageRetentionInDays: 1
+    }
+    resource certificationEventHubPubsubTopicMulti1Policy 'authorizationRules' = {
+      name: certificationEventHubPubsubTopicMulti1PolicyName
+      properties: {
+        rights: [
+          'Send'
+          'Listen'
+        ]
+      }
+    }
+    resource eventHubPubsubConsumerGroup 'consumergroups' = {
+      name: eventHubPubsubConsumerGroupName
+    }
+  }
+  resource certificationEventHubPubsubTopicMulti2 'eventhubs' = {
+    name: certificationEventHubPubsubTopicMulti2Name
+    properties: {
+      messageRetentionInDays: 1
+    }
+    resource certificationEventHubPubsubTopicMulti2Policy 'authorizationRules' = {
+      name: certificationEventHubPubsubTopicMulti2PolicyName
+      properties: {
+        rights: [
+          'Send'
+          'Listen'
+        ]
+      }
+    }
+    resource eventHubPubsubConsumerGroup 'consumergroups' = {
+      name: eventHubPubsubConsumerGroupName
+    }
+  }
 }
 
 output eventHubBindingsName string = eventHubsNamespace::eventHubBindings.name
@@ -128,6 +196,14 @@ output eventHubPubsubName string = eventHubsNamespace::eventHubPubsub.name
 output eventHubPubsubPolicyName string = eventHubsNamespace::eventHubPubsub::eventHubPubsubPolicy.name
 output eventHubPubsubConsumerGroupName string = eventHubsNamespace::eventHubPubsub::eventHubPubsubConsumerGroup.name
 
+output eventHubBulkPubsubName string = eventHubsNamespace::eventHubBulkPubsub.name
+output eventHubBulkPubsubPolicyName string = eventHubsNamespace::eventHubBulkPubsub::eventHubBulkPubsubPolicy.name
+
 output eventHubsNamespacePolicyName string = eventHubsNamespace::eventHubPubsubNamespacePolicy.name
 output certificationEventHubPubsubTopicActiveName string = eventHubsNamespace::certificationEventHubPubsubTopicActive.name
 output certificationEventHubPubsubTopicActivePolicyName string = eventHubsNamespace::certificationEventHubPubsubTopicActive::certificationEventHubPubsubTopicActivePolicy.name
+
+output certificationEventHubPubsubTopicMulti1Name string = eventHubsNamespace::certificationEventHubPubsubTopicMulti1.name
+output certificationEventHubPubsubTopicMulti2Name string = eventHubsNamespace::certificationEventHubPubsubTopicMulti2.name
+output certificationEventHubPubsubTopicMulti1PolicyName string = eventHubsNamespace::certificationEventHubPubsubTopicMulti1::certificationEventHubPubsubTopicMulti1Policy.name 
+output certificationEventHubPubsubTopicMulti2PolicyName string = eventHubsNamespace::certificationEventHubPubsubTopicMulti2::certificationEventHubPubsubTopicMulti2Policy.name 

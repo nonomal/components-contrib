@@ -18,7 +18,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/zbc"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -37,7 +37,7 @@ type mockClient struct {
 	zbc.Client
 }
 
-func (mcf mockClientFactory) Get(metadata bindings.Metadata) (zbc.Client, error) {
+func (mcf *mockClientFactory) Get(metadata bindings.Metadata) (zbc.Client, error) {
 	mcf.metadata = metadata
 
 	if mcf.error != nil {
@@ -53,21 +53,21 @@ func TestInit(t *testing.T) {
 	t.Run("returns error if client could not be instantiated properly", func(t *testing.T) {
 		errParsing := errors.New("error on parsing metadata")
 		metadata := bindings.Metadata{}
-		mcf := mockClientFactory{
+		mcf := &mockClientFactory{
 			error: errParsing,
 		}
 
 		cmd := ZeebeCommand{clientFactory: mcf, logger: testLogger}
-		err := cmd.Init(metadata)
+		err := cmd.Init(context.Background(), metadata)
 		assert.Error(t, err, errParsing)
 	})
 
 	t.Run("sets client from client factory", func(t *testing.T) {
 		metadata := bindings.Metadata{}
-		mcf := mockClientFactory{}
+		mcf := &mockClientFactory{}
 
 		cmd := ZeebeCommand{clientFactory: mcf, logger: testLogger}
-		err := cmd.Init(metadata)
+		err := cmd.Init(context.Background(), metadata)
 
 		assert.NoError(t, err)
 
@@ -93,17 +93,18 @@ func TestInvoke(t *testing.T) {
 func TestOperations(t *testing.T) {
 	testBinding := ZeebeCommand{logger: logger.NewLogger("test")}
 	operations := testBinding.Operations()
-	require.Equal(t, 12, len(operations))
+	require.Equal(t, 13, len(operations))
 	assert.Equal(t, TopologyOperation, operations[0])
 	assert.Equal(t, DeployProcessOperation, operations[1])
-	assert.Equal(t, CreateInstanceOperation, operations[2])
-	assert.Equal(t, CancelInstanceOperation, operations[3])
-	assert.Equal(t, SetVariablesOperation, operations[4])
-	assert.Equal(t, ResolveIncidentOperation, operations[5])
-	assert.Equal(t, PublishMessageOperation, operations[6])
-	assert.Equal(t, ActivateJobsOperation, operations[7])
-	assert.Equal(t, CompleteJobOperation, operations[8])
-	assert.Equal(t, FailJobOperation, operations[9])
-	assert.Equal(t, UpdateJobRetriesOperation, operations[10])
-	assert.Equal(t, ThrowErrorOperation, operations[11])
+	assert.Equal(t, DeployResourceOperation, operations[2])
+	assert.Equal(t, CreateInstanceOperation, operations[3])
+	assert.Equal(t, CancelInstanceOperation, operations[4])
+	assert.Equal(t, SetVariablesOperation, operations[5])
+	assert.Equal(t, ResolveIncidentOperation, operations[6])
+	assert.Equal(t, PublishMessageOperation, operations[7])
+	assert.Equal(t, ActivateJobsOperation, operations[8])
+	assert.Equal(t, CompleteJobOperation, operations[9])
+	assert.Equal(t, FailJobOperation, operations[10])
+	assert.Equal(t, UpdateJobRetriesOperation, operations[11])
+	assert.Equal(t, ThrowErrorOperation, operations[12])
 }

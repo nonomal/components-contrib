@@ -15,7 +15,7 @@ param storageName string
 param rgLocation string = resourceGroup().location
 param confTestTags object = {}
 
-resource storageAccount 'Microsoft.Storage/storageAccounts@2021-02-01' = {
+resource storageAccount 'Microsoft.Storage/storageAccounts@2022-09-01' = {
   name: storageName
   sku: {
     name: 'Standard_RAGRS'
@@ -23,15 +23,23 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2021-02-01' = {
   kind: 'StorageV2'
   location: rgLocation
   tags: confTestTags
-}
 
-resource blobServices 'Microsoft.Storage/storageAccounts/blobServices@2021-02-01' = {
-  parent: storageAccount
-  name: 'default'
-  properties: {
-    deleteRetentionPolicy: {
-      enabled: true
-      days: 1
+  resource blobServices 'blobServices@2022-09-01' = {
+    name: 'default'
+    properties: {
+      deleteRetentionPolicy: {
+        enabled: true
+        days: 1
+      }
+    }
+  }
+
+  resource tableServices 'tableServices@2022-09-01' = {
+    name: 'default'
+    properties: {}
+
+    resource certificationTable 'tables@2022-09-01' = {
+      name: 'certificationTable'
     }
   }
 }

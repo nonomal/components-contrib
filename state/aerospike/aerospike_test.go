@@ -18,7 +18,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/state"
+)
+
+const (
+	hosts     = "hosts"
+	namespace = "namespace"
+	set       = "set"
 )
 
 func TestValidateMetadataForValidInputs(t *testing.T) {
@@ -43,9 +50,9 @@ func TestValidateMetadataForValidInputs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			metadata := state.Metadata{Properties: test.properties}
-			err := validateMetadata(metadata)
-			assert.Nil(t, err)
+			metadata := state.Metadata{Base: metadata.Base{Properties: test.properties}}
+			_, err := parseAndValidateMetadata(metadata)
+			assert.NoError(t, err)
 		})
 	}
 }
@@ -77,9 +84,9 @@ func TestValidateMetadataForInvalidInputs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			metadata := state.Metadata{Properties: test.properties}
-			err := validateMetadata(metadata)
-			assert.NotNil(t, err)
+			metadata := state.Metadata{Base: metadata.Base{Properties: test.properties}}
+			_, err := parseAndValidateMetadata(metadata)
+			assert.Error(t, err)
 		})
 	}
 }
@@ -97,7 +104,7 @@ func TestParseHostsForValidInputs(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			result, err := parseHosts(test.hostPorts)
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			assert.NotNil(t, result)
 			assert.True(t, len(result) >= 1)
 		})
@@ -118,7 +125,7 @@ func TestParseHostsForInvalidInputs(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := parseHosts(test.hostPorts)
-			assert.NotNil(t, err)
+			assert.Error(t, err)
 		})
 	}
 }
@@ -126,12 +133,12 @@ func TestParseHostsForInvalidInputs(t *testing.T) {
 func TestConvertETag(t *testing.T) {
 	t.Run("valid conversion", func(t *testing.T) {
 		result, err := convertETag("42")
-		assert.Nil(t, err)
+		assert.NoError(t, err)
 		assert.Equal(t, uint32(42), result)
 	})
 
 	t.Run("invalid conversion", func(t *testing.T) {
 		_, err := convertETag("junk")
-		assert.NotNil(t, err)
+		assert.Error(t, err)
 	})
 }

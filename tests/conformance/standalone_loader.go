@@ -16,13 +16,14 @@ package conformance
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"io"
-	"io/ioutil"
 	"log"
+	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/ghodss/yaml"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -45,7 +46,7 @@ func NewStandaloneComponents(componentPath string) *StandaloneComponents {
 // LoadComponents loads dapr components from a given directory.
 func (s *StandaloneComponents) LoadComponents() ([]Component, error) {
 	dir := s.componentsPath
-	files, err := ioutil.ReadDir(dir)
+	files, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +57,14 @@ func (s *StandaloneComponents) LoadComponents() ([]Component, error) {
 		if !file.IsDir() && s.isYaml(file.Name()) {
 			path := filepath.Join(dir, file.Name())
 
-			b, err := ioutil.ReadFile(path)
+			b, err := os.ReadFile(path)
 			if err != nil {
 				log.Printf("error reading file %s : %s", path, err)
 
 				continue
 			}
 
-			components, _ := s.decodeYaml(path, b)
+			components := s.decodeYaml(path, b)
 			list = append(list, components...)
 		}
 	}
@@ -82,17 +83,15 @@ func (s *StandaloneComponents) isYaml(fileName string) bool {
 }
 
 // decodeYaml decodes the yaml document.
-func (s *StandaloneComponents) decodeYaml(filename string, b []byte) ([]Component, []error) {
+func (s *StandaloneComponents) decodeYaml(filename string, b []byte) []Component {
 	list := []Component{}
-	errors := []error{}
 	scanner := bufio.NewScanner(bytes.NewReader(b))
 	scanner.Split(s.splitYamlDoc)
 
 	for {
 		var comp Component
-		comp.Spec = ComponentSpec{}
 		err := s.decode(scanner, &comp)
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 
@@ -103,13 +102,13 @@ func (s *StandaloneComponents) decodeYaml(filename string, b []byte) ([]Componen
 		list = append(list, comp)
 	}
 
-	return list, errors
+	return list
 }
 
 // decode reads the YAML resource in document.
-func (s *StandaloneComponents) decode(scanner *bufio.Scanner, c interface{}) error {
+func (s *StandaloneComponents) decode(scanner *bufio.Scanner, c any) error {
 	if scanner.Scan() {
-		return yaml.Unmarshal(scanner.Bytes(), &c)
+		return yaml.Unmarshal(scanner.Bytes(), c)
 	}
 
 	err := scanner.Err()

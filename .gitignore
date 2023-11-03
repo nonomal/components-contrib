@@ -1,7 +1,11 @@
 /dist
 .idea
 .vscode
-/vendor
+vendor
 .dccache
 go.work
 go.work.sum
+.DS_Store
+component-metadata-bundle.json
+*.log
+metadataanalyzer

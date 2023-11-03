@@ -14,43 +14,53 @@ limitations under the License.
 package oracledatabase
 
 import (
-	"fmt"
+	"context"
+	"database/sql"
+	"reflect"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/state"
 	"github.com/dapr/kit/logger"
 )
 
 // Oracle Database state store.
 type OracleDatabase struct {
+	state.BulkStore
+
 	features []state.Feature
 	logger   logger.Logger
 	dbaccess dbAccess
 }
 
 // NewOracleDatabaseStateStore creates a new instance of OracleDatabase state store.
-func NewOracleDatabaseStateStore(logger logger.Logger) *OracleDatabase {
+func NewOracleDatabaseStateStore(logger logger.Logger) state.Store {
 	dba := newOracleDatabaseAccess(logger)
-
-	return newOracleDatabaseStateStore(logger, dba)
+	s := newOracleDatabaseStateStore(logger, dba)
+	s.BulkStore = state.NewDefaultBulkStore(s)
+	return s
 }
 
 // newOracleDatabaseStateStore creates a newOracleDatabaseStateStore instance of an OracleDatabase state store.
 // This unexported constructor allows injecting a dbAccess instance for unit testing.
 func newOracleDatabaseStateStore(logger logger.Logger, dba dbAccess) *OracleDatabase {
 	return &OracleDatabase{
-		features: []state.Feature{state.FeatureETag, state.FeatureTransactional},
+		features: []state.Feature{
+			state.FeatureETag,
+			state.FeatureTransactional,
+			state.FeatureTTL,
+		},
 		logger:   logger,
 		dbaccess: dba,
 	}
 }
 
 // Init initializes the SQL server state store.
-func (o *OracleDatabase) Init(metadata state.Metadata) error {
-	return o.dbaccess.Init(metadata)
+func (o *OracleDatabase) Init(ctx context.Context, metadata state.Metadata) error {
+	return o.dbaccess.Init(ctx, metadata)
 }
 
-func (o *OracleDatabase) Ping() error {
-	return o.dbaccess.Ping()
+func (o *OracleDatabase) Ping(ctx context.Context) error {
+	return o.dbaccess.Ping(ctx)
 }
 
 // Features returns the features available in this state store.
@@ -59,66 +69,23 @@ func (o *OracleDatabase) Features() []state.Feature {
 }
 
 // Delete removes an entity from the store.
-func (o *OracleDatabase) Delete(req *state.DeleteRequest) error {
-	return o.dbaccess.Delete(req)
-}
-
-// BulkDelete removes multiple entries from the store.
-func (o *OracleDatabase) BulkDelete(req []state.DeleteRequest) error {
-	return o.dbaccess.ExecuteMulti(nil, req)
+func (o *OracleDatabase) Delete(ctx context.Context, req *state.DeleteRequest) error {
+	return o.dbaccess.Delete(ctx, req)
 }
 
 // Get returns an entity from store.
-func (o *OracleDatabase) Get(req *state.GetRequest) (*state.GetResponse, error) {
-	return o.dbaccess.Get(req)
-}
-
-// BulkGet performs a bulks get operations.
-func (o *OracleDatabase) BulkGet(req []state.GetRequest) (bool, []state.BulkGetResponse, error) {
-	// TODO: replace with ExecuteMulti for performance.
-	return false, nil, nil
+func (o *OracleDatabase) Get(ctx context.Context, req *state.GetRequest) (*state.GetResponse, error) {
+	return o.dbaccess.Get(ctx, req)
 }
 
 // Set adds/updates an entity on store.
-func (o *OracleDatabase) Set(req *state.SetRequest) error {
-	return o.dbaccess.Set(req)
-}
-
-// BulkSet adds/updates multiple entities on store.
-func (o *OracleDatabase) BulkSet(req []state.SetRequest) error {
-	return o.dbaccess.ExecuteMulti(req, nil)
+func (o *OracleDatabase) Set(ctx context.Context, req *state.SetRequest) error {
+	return o.dbaccess.Set(ctx, req)
 }
 
 // Multi handles multiple transactions. Implements TransactionalStore.
-func (o *OracleDatabase) Multi(request *state.TransactionalStateRequest) error {
-	var deletes []state.DeleteRequest
-	var sets []state.SetRequest
-	for _, req := range request.Operations {
-		switch req.Operation {
-		case state.Upsert:
-			if setReq, ok := req.Request.(state.SetRequest); ok {
-				sets = append(sets, setReq)
-			} else {
-				return fmt.Errorf("expecting set request")
-			}
-
-		case state.Delete:
-			if delReq, ok := req.Request.(state.DeleteRequest); ok {
-				deletes = append(deletes, delReq)
-			} else {
-				return fmt.Errorf("expecting delete request")
-			}
-
-		default:
-			return fmt.Errorf("unsupported operation: %s", req.Operation)
-		}
-	}
-
-	if len(sets) > 0 || len(deletes) > 0 {
-		return o.dbaccess.ExecuteMulti(sets, deletes)
-	}
-
-	return nil
+func (o *OracleDatabase) Multi(ctx context.Context, request *state.TransactionalStateRequest) error {
+	return o.dbaccess.ExecuteMulti(ctx, request.Operations)
 }
 
 // Close implements io.Closer.
@@ -128,4 +95,15 @@ func (o *OracleDatabase) Close() error {
 	}
 
 	return nil
+}
+
+// Returns the database connection. Used by tests.
+func (o *OracleDatabase) getDB() *sql.DB {
+	return o.dbaccess.(*oracleDatabaseAccess).db
+}
+
+func (o *OracleDatabase) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := oracleDatabaseMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.StateStoreType)
+	return
 }

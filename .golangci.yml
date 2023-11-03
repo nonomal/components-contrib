@@ -4,7 +4,7 @@ run:
   concurrency: 4
 
   # timeout for analysis, e.g. 30s, 5m, default is 1m
-  deadline: 5m
+  deadline: 15m
 
   # exit code when at least one issue was found, default is 1
   issues-exit-code: 1
@@ -13,8 +13,10 @@ run:
   tests: true
 
   # list of build tags, all linters use it. Default is empty list.
-  #build-tags:
-  #  - mytag
+  build-tags:
+    - certtests
+    - conftests
+    - metadata
 
   # which dirs to skip: they won't be analyzed;
   # can use regexp here: generated.*, regexp is applied on full path;
@@ -31,7 +33,7 @@ run:
   # skip-files:
   #  - ".*\\.my\\.go$"
   #  - lib/bad.go
-  
+
 # output configuration options
 output:
   # colored-line-number|line-number|json|tab|checkstyle, default is "colored-line-number"
@@ -116,13 +118,33 @@ linters-settings:
     # minimal occurrences count to trigger, 3 by default
     min-occurrences: 5
   depguard:
-    list-type: blacklist
+    list-type: denylist
     include-go-root: false
-    packages:
-      - github.com/Sirupsen/logrus
-    packages-with-error-messages:
-      # specify an error message to output when a blacklisted package is used
-      github.com/Sirupsen/logrus: "must use github.com/dapr/kit/logger"
+    packages-with-error-message:
+      - "go.uber.org/atomic": "must use sync/atomic"
+      - "golang.org/x/net/context": "must use context"
+      - "github.com/pkg/errors": "must use standard library (errors package and/or fmt.Errorf)"
+      - "github.com/Sirupsen/logrus": "must use github.com/dapr/kit/logger"
+      - "github.com/labstack/gommon/log": "must use github.com/dapr/kit/logger"
+      - "github.com/gobuffalo/logger": "must use github.com/dapr/kit/logger"
+      - "github.com/agrea/ptr": "must use github.com/dapr/kit/ptr"
+      - "github.com/cenkalti/backoff$": "must use github.com/cenkalti/backoff/v4"
+      - "github.com/cenkalti/backoff/v2": "must use github.com/cenkalti/backoff/v4"
+      - "github.com/cenkalti/backoff/v3": "must use github.com/cenkalti/backoff/v4"
+      - "github.com/dgrijalva/jwt-go": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/golang-jwt/jwt$": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/golang-jwt/jwt/v4": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/lestrrat-go/jwx/jwa": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/lestrrat-go/jwx/jwt": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/lestrrat-go/jwx/jws": "must use github.com/lestrrat-go/jwx/v2"
+      - "github.com/gogo/status": "must use google.golang.org/grpc/status"
+      - "github.com/gogo/protobuf": "must use google.golang.org/protobuf"
+      - "k8s.io/utils/pointer": "must use github.com/dapr/kit/ptr"
+      - "k8s.io/utils/ptr": "must use github.com/dapr/kit/ptr"
+      - "github.com/ghodss/yaml": "must use sigs.k8s.io/yaml"
+      - "gopkg.in/yaml.v2": "must use gopkg.in/yaml.v3"
+      - "github.com/go-chi/chi$": "must use github.com/go-chi/chi/v5"
+      - "github.com/benbjohnson/clock": "must use k8s.io/utils/clock"
   misspell:
     # Correct spellings using locale preferences for US or UK.
     # Default is to use a neutral variety of English.
@@ -225,6 +247,7 @@ linters:
   disable:
     # TODO Enforce the below linters later
     - dupl
+    - musttag
     - errcheck
     - funlen
     - gochecknoglobals
@@ -244,6 +267,7 @@ linters:
     - nestif
     - nlreturn
     - exhaustive
+    - exhaustruct
     - noctx
     - gci
     - golint
@@ -259,7 +283,6 @@ linters:
     - godot
     - cyclop
     - varnamelen
-    - gosec
     - errorlint
     - forcetypeassert
     - ifshort
@@ -271,3 +294,12 @@ linters:
     - wastedassign
     - containedctx
     - gosimple
+    - nonamedreturns
+    - asasalint
+    - rowserrcheck
+    - sqlclosecheck
+    - structcheck
+    - deadcode
+    - nosnakecase
+    - varcheck
+    - goconst

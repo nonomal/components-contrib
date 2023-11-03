@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Dapr Authors
+Copyright 2023 The Dapr Authors
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -18,31 +18,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 )
-
-// TestSetRequestWithOptions is used to test request options.
-func TestSetRequestWithOptions(t *testing.T) {
-	t.Run("set with default options", func(t *testing.T) {
-		counter := 0
-		SetWithOptions(func(req *SetRequest) error {
-			counter++
-
-			return nil
-		}, &SetRequest{})
-		assert.Equal(t, 1, counter, "should execute only once")
-	})
-
-	t.Run("set with no explicit options", func(t *testing.T) {
-		counter := 0
-		SetWithOptions(func(req *SetRequest) error {
-			counter++
-
-			return nil
-		}, &SetRequest{
-			Options: SetStateOption{},
-		})
-		assert.Equal(t, 1, counter, "should execute only once")
-	})
-}
 
 // TestCheckRequestOptions is used to validate request options.
 func TestCheckRequestOptions(t *testing.T) {

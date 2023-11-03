@@ -19,17 +19,25 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 )
 
-func updatePasswordAuthInfo(config *sarama.Config, saslUsername, saslPassword string) {
+func updatePasswordAuthInfo(config *sarama.Config, metadata *KafkaMetadata, saslUsername, saslPassword string) {
 	config.Net.SASL.Enable = true
 	config.Net.SASL.User = saslUsername
 	config.Net.SASL.Password = saslPassword
-	config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+	if metadata.SaslMechanism == "SHA-256" {
+		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA256} }
+		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA256
+	} else if metadata.SaslMechanism == "SHA-512" {
+		config.Net.SASL.SCRAMClientGeneratorFunc = func() sarama.SCRAMClient { return &XDGSCRAMClient{HashGeneratorFcn: SHA512} }
+		config.Net.SASL.Mechanism = sarama.SASLTypeSCRAMSHA512
+	} else {
+		config.Net.SASL.Mechanism = sarama.SASLTypePlaintext
+	}
 }
 
-func updateMTLSAuthInfo(config *sarama.Config, metadata *kafkaMetadata) error {
+func updateMTLSAuthInfo(config *sarama.Config, metadata *KafkaMetadata) error {
 	if metadata.TLSDisable {
 		return fmt.Errorf("kafka: cannot configure mTLS authentication when TLSDisable is 'true'")
 	}
@@ -41,17 +49,17 @@ func updateMTLSAuthInfo(config *sarama.Config, metadata *kafkaMetadata) error {
 	return nil
 }
 
-func updateTLSConfig(config *sarama.Config, metadata *kafkaMetadata) error {
+func updateTLSConfig(config *sarama.Config, metadata *KafkaMetadata) error {
 	if metadata.TLSDisable || metadata.AuthType == noAuthType {
 		config.Net.TLS.Enable = false
 		return nil
 	}
+	config.Net.TLS.Enable = true
+
 	if !metadata.TLSSkipVerify && metadata.TLSCaCert == "" {
-		config.Net.TLS.Enable = false
 		return nil
 	}
-
-	// nolint: gosec
+	//nolint:gosec
 	config.Net.TLS.Config = &tls.Config{InsecureSkipVerify: metadata.TLSSkipVerify, MinVersion: tls.VersionTLS12}
 	if metadata.TLSCaCert != "" {
 		caCertPool := x509.NewCertPool()
@@ -59,14 +67,13 @@ func updateTLSConfig(config *sarama.Config, metadata *kafkaMetadata) error {
 			return errors.New("kafka error: unable to load ca certificate")
 		}
 		config.Net.TLS.Config.RootCAs = caCertPool
-		config.Net.TLS.Enable = true
 	}
 
 	return nil
 }
 
-func updateOidcAuthInfo(config *sarama.Config, metadata *kafkaMetadata) error {
-	tokenProvider := newOAuthTokenSource(metadata.OidcTokenEndpoint, metadata.OidcClientID, metadata.OidcClientSecret, metadata.OidcScopes)
+func updateOidcAuthInfo(config *sarama.Config, metadata *KafkaMetadata) error {
+	tokenProvider := metadata.getOAuthTokenSource()
 
 	if metadata.TLSCaCert != "" {
 		err := tokenProvider.addCa(metadata.TLSCaCert)
@@ -75,11 +82,9 @@ func updateOidcAuthInfo(config *sarama.Config, metadata *kafkaMetadata) error {
 		}
 	}
 
-	tokenProvider.skipCaVerify = metadata.TLSSkipVerify
-
 	config.Net.SASL.Enable = true
 	config.Net.SASL.Mechanism = sarama.SASLTypeOAuth
-	config.Net.SASL.TokenProvider = &tokenProvider
+	config.Net.SASL.TokenProvider = tokenProvider
 
 	return nil
 }

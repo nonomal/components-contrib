@@ -19,14 +19,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/commands"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/pb"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/commands"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/pb"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/zbc"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dapr/components-contrib/bindings"
-	contrib_metadata "github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 type mockPublishMessageClient struct {
@@ -76,8 +76,7 @@ func (cmd2 *mockPublishMessageCommandStep2) CorrelationKey(correlationKey string
 }
 
 // MessageId comes from the Zeebe client API and cannot be written as MessageID
-// Note that when the `stylecheck` linter is working again, this method will need "nolink:stylecheck" (can't change name to ID or it won't satisfy an interface)
-func (cmd3 *mockPublishMessageCommandStep3) MessageId(messageID string) commands.PublishMessageCommandStep3 {
+func (cmd3 *mockPublishMessageCommandStep3) MessageId(messageID string) commands.PublishMessageCommandStep3 { //nolint:stylecheck
 	cmd3.messageID = messageID
 
 	return cmd3
@@ -133,7 +132,7 @@ func TestPublishMessage(t *testing.T) {
 			MessageName:    "a",
 			CorrelationKey: "b",
 			MessageID:      "c",
-			TimeToLive:     contrib_metadata.Duration{Duration: 1 * time.Second},
+			TimeToLive:     kitmd.Duration{Duration: 1 * time.Second},
 			Variables: map[string]interface{}{
 				"key": "value",
 			},

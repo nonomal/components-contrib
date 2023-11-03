@@ -18,9 +18,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/commands"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/pb"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/commands"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/pb"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/zbc"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dapr/components-contrib/bindings"
@@ -63,7 +63,7 @@ func (mc *mockCreateInstanceClient) NewCreateInstanceCommand() commands.CreateIn
 
 // BPMNProcessId comes from the Zeebe client API and cannot be written as BPMNProcessID
 // Note that when the `stylecheck` linter is working again, this method will need "nolink:stylecheck" (can't change name to ID or it won't satisfy an interface)
-func (cmd1 *mockCreateInstanceCommandStep1) BPMNProcessId(bpmnProcessID string) commands.CreateInstanceCommandStep2 {
+func (cmd1 *mockCreateInstanceCommandStep1) BPMNProcessId(bpmnProcessID string) commands.CreateInstanceCommandStep2 { //nolint:stylecheck
 	cmd1.bpmnProcessID = bpmnProcessID
 
 	return cmd1.cmd2

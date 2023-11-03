@@ -18,6 +18,7 @@ import (
 	"math/rand"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -25,11 +26,10 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	// SecretStores
-	"github.com/dapr/components-contrib/secretstores"
+
 	akv "github.com/dapr/components-contrib/secretstores/azure/keyvault"
 	secretstore_env "github.com/dapr/components-contrib/secretstores/local/env"
 	secretstores_loader "github.com/dapr/dapr/pkg/components/secretstores"
-	"github.com/dapr/dapr/pkg/runtime"
 	dapr_testing "github.com/dapr/dapr/pkg/testing"
 	"github.com/dapr/kit/logger"
 
@@ -49,8 +49,6 @@ func TestKeyVault(t *testing.T) {
 
 	currentGrpcPort := ports[0]
 	currentHttpPort := ports[1]
-
-	log := logger.NewLogger("dapr.components")
 
 	testGetKnownSecret := func(ctx flow.Context) error {
 		client, err := client.NewClientWithPort(fmt.Sprint(currentGrpcPort))
@@ -74,18 +72,13 @@ func TestKeyVault(t *testing.T) {
 
 	flow.New(t, "keyvault authentication using service principal").
 		Step(sidecar.Run(sidecarName,
-			embedded.WithoutApp(),
-			embedded.WithComponentsPath("./components/serviceprincipal"),
-			embedded.WithDaprGRPCPort(currentGrpcPort),
-			embedded.WithDaprHTTPPort(currentHttpPort),
-			runtime.WithSecretStores(
-				secretstores_loader.New("local.env", func() secretstores.SecretStore {
-					return secretstore_env.NewEnvSecretStore(log)
-				}),
-				secretstores_loader.New("azure.keyvault", func() secretstores.SecretStore {
-					return akv.NewAzureKeyvaultSecretStore(log)
-				}),
-			))).
+			append(componentRuntimeOptions(),
+				embedded.WithoutApp(),
+				embedded.WithComponentsPath("./components/serviceprincipal"),
+				embedded.WithDaprGRPCPort(strconv.Itoa(currentGrpcPort)),
+				embedded.WithDaprHTTPPort(strconv.Itoa(currentHttpPort)),
+			)...,
+		)).
 		Step("Getting known secret", testGetKnownSecret).
 		Run()
 
@@ -97,18 +90,13 @@ func TestKeyVault(t *testing.T) {
 
 	flow.New(t, "keyvault authentication using certificate").
 		Step(sidecar.Run(sidecarName,
-			embedded.WithoutApp(),
-			embedded.WithComponentsPath("./components/certificate"),
-			embedded.WithDaprGRPCPort(currentGrpcPort),
-			embedded.WithDaprHTTPPort(currentHttpPort),
-			runtime.WithSecretStores(
-				secretstores_loader.New("local.env", func() secretstores.SecretStore {
-					return secretstore_env.NewEnvSecretStore(log)
-				}),
-				secretstores_loader.New("azure.keyvault", func() secretstores.SecretStore {
-					return akv.NewAzureKeyvaultSecretStore(log)
-				}),
-			))).
+			append(componentRuntimeOptions(),
+				embedded.WithoutApp(),
+				embedded.WithComponentsPath("./components/certificate"),
+				embedded.WithDaprGRPCPort(strconv.Itoa(currentGrpcPort)),
+				embedded.WithDaprHTTPPort(strconv.Itoa(currentHttpPort)),
+			)...,
+		)).
 		Step("Getting known secret", testGetKnownSecret, sidecar.Stop(sidecarName)).
 		Run()
 
@@ -200,4 +188,17 @@ func TestKeyVault(t *testing.T) {
 		Step("Test secret access using managed identity authentication", managedIdentityTest)
 	// temporarily disable the managed identity test until we decide whether to remove this test or find a different way to spin up the required environment.
 	// Run().
+}
+
+func componentRuntimeOptions() []embedded.Option {
+	log := logger.NewLogger("dapr.components")
+
+	secretstoreRegistry := secretstores_loader.NewRegistry()
+	secretstoreRegistry.Logger = log
+	secretstoreRegistry.RegisterComponent(akv.NewAzureKeyvaultSecretStore, "azure.keyvault")
+	secretstoreRegistry.RegisterComponent(secretstore_env.NewEnvSecretStore, "local.env")
+
+	return []embedded.Option{
+		embedded.WithSecretStores(secretstoreRegistry),
+	}
 }

@@ -20,17 +20,20 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"reflect"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
-	"github.com/pkg/errors"
 
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 const (
@@ -49,16 +52,10 @@ const (
 	// &tls=custom
 	// The connection string should be in the following format
 	// "%s:%s@tcp(%s:3306)/%s?allowNativePasswords=true&tls=custom",'myadmin@mydemoserver', 'yourpassword', 'mydemoserver.mysql.database.azure.com', 'targetdb'.
-	pemPathKey = "pemPath"
-
-	// other general settings for DB connections.
-	maxIdleConnsKey    = "maxIdleConns"
-	maxOpenConnsKey    = "maxOpenConns"
-	connMaxLifetimeKey = "connMaxLifetime"
-	connMaxIdleTimeKey = "connMaxIdleTime"
 
 	// keys from request's metadata.
-	commandSQLKey = "sql"
+	commandSQLKey    = "sql"
+	commandParamsKey = "params"
 
 	// keys from response's metadata.
 	respOpKey           = "operation"
@@ -73,56 +70,75 @@ const (
 type Mysql struct {
 	db     *sql.DB
 	logger logger.Logger
+	closed atomic.Bool
 }
 
-var _ = bindings.OutputBinding(&Mysql{})
+type mysqlMetadata struct {
+	// URL is the connection string to connect to MySQL.
+	URL string `mapstructure:"url"`
+
+	// PemPath is the path to the pem file to connect to MySQL over SSL.
+	PemPath string `mapstructure:"pemPath"`
+
+	// MaxIdleConns is the maximum number of connections in the idle connection pool.
+	MaxIdleConns int `mapstructure:"maxIdleConns"`
+
+	// MaxOpenConns is the maximum number of open connections to the database.
+	MaxOpenConns int `mapstructure:"maxOpenConns"`
+
+	// ConnMaxLifetime is the maximum amount of time a connection may be reused.
+	ConnMaxLifetime time.Duration `mapstructure:"connMaxLifetime"`
+
+	// ConnMaxIdleTime is the maximum amount of time a connection may be idle.
+	ConnMaxIdleTime time.Duration `mapstructure:"connMaxIdleTime"`
+}
 
 // NewMysql returns a new MySQL output binding.
-func NewMysql(logger logger.Logger) *Mysql {
-	return &Mysql{logger: logger}
+func NewMysql(logger logger.Logger) bindings.OutputBinding {
+	return &Mysql{
+		logger: logger,
+	}
 }
 
 // Init initializes the MySQL binding.
-func (m *Mysql) Init(metadata bindings.Metadata) error {
-	m.logger.Debug("Initializing MySql binding")
+func (m *Mysql) Init(ctx context.Context, md bindings.Metadata) error {
+	if m.closed.Load() {
+		return errors.New("cannot initialize a previously-closed component")
+	}
 
-	p := metadata.Properties
-	url, ok := p[connectionURLKey]
-	if !ok || url == "" {
+	// Parse metadata
+	meta := mysqlMetadata{}
+	err := kitmd.DecodeMetadata(md.Properties, &meta)
+	if err != nil {
+		return err
+	}
+
+	if meta.URL == "" {
 		return fmt.Errorf("missing MySql connection string")
 	}
 
-	db, err := initDB(url, metadata.Properties[pemPathKey])
+	m.db, err = initDB(meta.URL, meta.PemPath)
 	if err != nil {
 		return err
 	}
 
-	err = propertyToInt(p, maxIdleConnsKey, db.SetMaxIdleConns)
-	if err != nil {
-		return err
+	if meta.MaxIdleConns > 0 {
+		m.db.SetMaxIdleConns(meta.MaxIdleConns)
+	}
+	if meta.MaxOpenConns > 0 {
+		m.db.SetMaxOpenConns(meta.MaxOpenConns)
+	}
+	if meta.ConnMaxIdleTime > 0 {
+		m.db.SetConnMaxIdleTime(meta.ConnMaxIdleTime)
+	}
+	if meta.ConnMaxLifetime > 0 {
+		m.db.SetConnMaxLifetime(meta.ConnMaxLifetime)
 	}
 
-	err = propertyToInt(p, maxOpenConnsKey, db.SetMaxOpenConns)
+	err = m.db.PingContext(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("unable to ping the DB: %w", err)
 	}
-
-	err = propertyToDuration(p, connMaxIdleTimeKey, db.SetConnMaxIdleTime)
-	if err != nil {
-		return err
-	}
-
-	err = propertyToDuration(p, connMaxLifetimeKey, db.SetConnMaxLifetime)
-	if err != nil {
-		return err
-	}
-
-	err = db.Ping()
-	if err != nil {
-		return errors.Wrap(err, "unable to ping the DB")
-	}
-
-	m.db = db
 
 	return nil
 }
@@ -130,25 +146,41 @@ func (m *Mysql) Init(metadata bindings.Metadata) error {
 // Invoke handles all invoke operations.
 func (m *Mysql) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
 	if req == nil {
-		return nil, errors.Errorf("invoke request required")
+		return nil, errors.New("invoke request required")
 	}
 
+	// We let the "close" operation here succeed even if the component has been closed already
 	if req.Operation == closeOperation {
-		return nil, m.db.Close()
+		return nil, m.Close()
+	}
+
+	if m.closed.Load() {
+		return nil, errors.New("component is closed")
 	}
 
 	if req.Metadata == nil {
-		return nil, errors.Errorf("metadata required")
+		return nil, errors.New("metadata required")
 	}
-	m.logger.Debugf("operation: %v", req.Operation)
 
-	s, ok := req.Metadata[commandSQLKey]
-	if !ok || s == "" {
-		return nil, errors.Errorf("required metadata not set: %s", commandSQLKey)
+	s := req.Metadata[commandSQLKey]
+	if s == "" {
+		return nil, fmt.Errorf("required metadata not set: %s", commandSQLKey)
+	}
+
+	// Metadata property "params" contains JSON-encoded parameters, and it's optional
+	// If present, it must be unserializable into a []any object
+	var (
+		params []any
+		err    error
+	)
+	if paramsStr := req.Metadata[commandParamsKey]; paramsStr != "" {
+		err = json.Unmarshal([]byte(paramsStr), &params)
+		if err != nil {
+			return nil, fmt.Errorf("invalid metadata property %s: failed to unserialize into an array: %w", commandParamsKey, err)
+		}
 	}
 
 	startTime := time.Now().UTC()
-
 	resp := &bindings.InvokeResponse{
 		Metadata: map[string]string{
 			respOpKey:        string(req.Operation),
@@ -157,23 +189,23 @@ func (m *Mysql) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*bindi
 		},
 	}
 
-	switch req.Operation { // nolint: exhaustive
+	switch req.Operation {
 	case execOperation:
-		r, err := m.exec(s)
+		r, err := m.exec(ctx, s, params...)
 		if err != nil {
 			return nil, err
 		}
 		resp.Metadata[respRowsAffectedKey] = strconv.FormatInt(r, 10)
 
 	case queryOperation:
-		d, err := m.query(s)
+		d, err := m.query(ctx, s, params...)
 		if err != nil {
 			return nil, err
 		}
 		resp.Data = d
 
 	default:
-		return nil, errors.Errorf("invalid operation type: %s. Expected %s, %s, or %s",
+		return nil, fmt.Errorf("invalid operation type: %s. Expected %s, %s, or %s",
 			req.Operation, execOperation, queryOperation, closeOperation)
 	}
 
@@ -195,79 +227,56 @@ func (m *Mysql) Operations() []bindings.OperationKind {
 
 // Close will close the DB.
 func (m *Mysql) Close() error {
+	if !m.closed.CompareAndSwap(false, true) {
+		// If this failed, the component has already been closed
+		// We allow multiple calls to close
+		return nil
+	}
+
 	if m.db != nil {
-		return m.db.Close()
+		m.db.Close()
+		m.db = nil
 	}
 
 	return nil
 }
 
-func (m *Mysql) query(sql string) ([]byte, error) {
-	m.logger.Debugf("query: %s", sql)
-
-	rows, err := m.db.Query(sql)
+func (m *Mysql) query(ctx context.Context, sql string, params ...any) ([]byte, error) {
+	rows, err := m.db.QueryContext(ctx, sql, params...)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error executing %s", sql)
+		return nil, fmt.Errorf("error executing query: %w", err)
 	}
-
-	defer func() {
-		_ = rows.Close()
-		_ = rows.Err()
-	}()
+	defer rows.Close()
 
 	result, err := m.jsonify(rows)
 	if err != nil {
-		return nil, errors.Wrapf(err, "error marshalling query result for %s", sql)
+		return nil, fmt.Errorf("error marshalling query result for query: %w", err)
 	}
 
 	return result, nil
 }
 
-func (m *Mysql) exec(sql string) (int64, error) {
-	m.logger.Debugf("exec: %s", sql)
-
-	res, err := m.db.Exec(sql)
+func (m *Mysql) exec(ctx context.Context, sql string, params ...any) (int64, error) {
+	res, err := m.db.ExecContext(ctx, sql, params...)
 	if err != nil {
-		return 0, errors.Wrapf(err, "error executing %s", sql)
+		return 0, fmt.Errorf("error executing query: %w", err)
 	}
 
 	return res.RowsAffected()
 }
 
-func propertyToInt(props map[string]string, key string, setter func(int)) error {
-	if v, ok := props[key]; ok {
-		if i, err := strconv.Atoi(v); err == nil {
-			setter(i)
-		} else {
-			return errors.Wrapf(err, "error converitng %s:%s to int", key, v)
-		}
-	}
-
-	return nil
-}
-
-func propertyToDuration(props map[string]string, key string, setter func(time.Duration)) error {
-	if v, ok := props[key]; ok {
-		if d, err := time.ParseDuration(v); err == nil {
-			setter(d)
-		} else {
-			return errors.Wrapf(err, "error converitng %s:%s to time duration", key, v)
-		}
-	}
-
-	return nil
-}
-
 func initDB(url, pemPath string) (*sql.DB, error) {
-	if _, err := mysql.ParseDSN(url); err != nil {
-		return nil, errors.Wrapf(err, "illegal Data Source Name (DNS) specified by %s", connectionURLKey)
+	conf, err := mysql.ParseDSN(url)
+	if err != nil {
+		return nil, fmt.Errorf("illegal Data Source Name (DSN) specified by %s", connectionURLKey)
 	}
 
 	if pemPath != "" {
+		var pem []byte
 		rootCertPool := x509.NewCertPool()
-		pem, err := ioutil.ReadFile(pemPath)
+		pem, err = os.ReadFile(pemPath)
 		if err != nil {
-			return nil, errors.Wrapf(err, "Error reading PEM file from %s", pemPath)
+			return nil, fmt.Errorf("error reading PEM file from %s: %w", pemPath, err)
 		}
 
 		ok := rootCertPool.AppendCertsFromPEM(pem)
@@ -275,17 +284,25 @@ func initDB(url, pemPath string) (*sql.DB, error) {
 			return nil, fmt.Errorf("failed to append PEM")
 		}
 
-		err = mysql.RegisterTLSConfig("custom", &tls.Config{RootCAs: rootCertPool, MinVersion: tls.VersionTLS12})
+		err = mysql.RegisterTLSConfig("custom", &tls.Config{
+			RootCAs:    rootCertPool,
+			MinVersion: tls.VersionTLS12,
+		})
 		if err != nil {
-			return nil, errors.Wrap(err, "Error register TLS config")
+			return nil, fmt.Errorf("error register TLS config: %w", err)
 		}
 	}
 
-	db, err := sql.Open("mysql", url)
+	// Required to correctly parse time columns
+	// See: https://stackoverflow.com/a/45040724
+	conf.ParseTime = true
+
+	connector, err := mysql.NewConnector(conf)
 	if err != nil {
-		return nil, errors.Wrap(err, "error opening DB connection")
+		return nil, fmt.Errorf("error opening DB connection: %w", err)
 	}
 
+	db := sql.OpenDB(connector)
 	return db, nil
 }
 
@@ -295,7 +312,7 @@ func (m *Mysql) jsonify(rows *sql.Rows) ([]byte, error) {
 		return nil, err
 	}
 
-	var ret []interface{}
+	var ret []any
 	for rows.Next() {
 		values := prepareValues(columnTypes)
 		err := rows.Scan(values...)
@@ -310,13 +327,13 @@ func (m *Mysql) jsonify(rows *sql.Rows) ([]byte, error) {
 	return json.Marshal(ret)
 }
 
-func prepareValues(columnTypes []*sql.ColumnType) []interface{} {
+func prepareValues(columnTypes []*sql.ColumnType) []any {
 	types := make([]reflect.Type, len(columnTypes))
 	for i, tp := range columnTypes {
 		types[i] = tp.ScanType()
 	}
 
-	values := make([]interface{}, len(columnTypes))
+	values := make([]any, len(columnTypes))
 	for i := range values {
 		values[i] = reflect.New(types[i]).Interface()
 	}
@@ -324,8 +341,8 @@ func prepareValues(columnTypes []*sql.ColumnType) []interface{} {
 	return values
 }
 
-func (m *Mysql) convert(columnTypes []*sql.ColumnType, values []interface{}) map[string]interface{} {
-	r := map[string]interface{}{}
+func (m *Mysql) convert(columnTypes []*sql.ColumnType, values []any) map[string]any {
+	r := map[string]any{}
 
 	for i, ct := range columnTypes {
 		value := values[i]
@@ -333,7 +350,7 @@ func (m *Mysql) convert(columnTypes []*sql.ColumnType, values []interface{}) map
 		switch v := values[i].(type) {
 		case driver.Valuer:
 			if vv, err := v.Value(); err == nil {
-				value = interface{}(vv)
+				value = any(vv)
 			} else {
 				m.logger.Warnf("error to convert value: %v", err)
 			}
@@ -351,4 +368,11 @@ func (m *Mysql) convert(columnTypes []*sql.ColumnType, values []interface{}) map
 	}
 
 	return r
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (m *Mysql) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := mysqlMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.BindingType)
+	return
 }

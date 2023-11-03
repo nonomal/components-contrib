@@ -18,71 +18,81 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"reflect"
 
 	"cloud.google.com/go/datastore"
 	jsoniter "github.com/json-iterator/go"
 	"google.golang.org/api/option"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/state"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
-const defaultEntityKind = "DaprState"
+const (
+	defaultEntityKind = "DaprState"
+	endpointKey       = "endpoint"
+)
 
 // Firestore State Store.
 type Firestore struct {
-	state.DefaultBulkStore
+	state.BulkStore
+
 	client     *datastore.Client
 	entityKind string
-
-	logger logger.Logger
+	noIndex    bool
+	logger     logger.Logger
 }
 
 type firestoreMetadata struct {
 	Type                string `json:"type"`
-	ProjectID           string `json:"project_id"`
-	PrivateKeyID        string `json:"private_key_id"`
-	PrivateKey          string `json:"private_key"`
-	ClientEmail         string `json:"client_email"`
-	ClientID            string `json:"client_id"`
-	AuthURI             string `json:"auth_uri"`
-	TokenURI            string `json:"token_uri"`
-	AuthProviderCertURL string `json:"auth_provider_x509_cert_url"`
-	ClientCertURL       string `json:"client_x509_cert_url"`
-	EntityKind          string `json:"entity_kind"`
+	ProjectID           string `json:"project_id" mapstructure:"project_id"`
+	PrivateKeyID        string `json:"private_key_id" mapstructure:"private_key_id"`
+	PrivateKey          string `json:"private_key" mapstructure:"private_key"`
+	ClientEmail         string `json:"client_email" mapstructure:"client_email"`
+	ClientID            string `json:"client_id" mapstructure:"client_id"`
+	AuthURI             string `json:"auth_uri" mapstructure:"auth_uri"`
+	TokenURI            string `json:"token_uri" mapstructure:"token_uri"`
+	AuthProviderCertURL string `json:"auth_provider_x509_cert_url" mapstructure:"auth_provider_x509_cert_url"`
+	ClientCertURL       string `json:"client_x509_cert_url" mapstructure:"client_x509_cert_url"`
+	EntityKind          string `json:"entity_kind" mapstructure:"entity_kind"`
+	NoIndex             bool   `json:"-"`
+	ConnectionEndpoint  string `json:"endpoint"`
 }
 
 type StateEntity struct {
 	Value string
 }
 
-func NewFirestoreStateStore(logger logger.Logger) *Firestore {
-	s := &Firestore{logger: logger}
-	s.DefaultBulkStore = state.NewDefaultBulkStore(s)
+type StateEntityNoIndex struct {
+	Value string `datastore:",noindex"`
+}
 
+func NewFirestoreStateStore(logger logger.Logger) state.Store {
+	s := &Firestore{
+		logger: logger,
+	}
+	s.BulkStore = state.NewDefaultBulkStore(s)
 	return s
 }
 
 // Init does metadata and connection parsing.
-func (f *Firestore) Init(metadata state.Metadata) error {
+func (f *Firestore) Init(ctx context.Context, metadata state.Metadata) error {
 	meta, err := getFirestoreMetadata(metadata)
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(meta)
-	if err != nil {
-		return err
-	}
 
-	opt := option.WithCredentialsJSON(b)
-	ctx := context.Background()
-	client, err := datastore.NewClient(ctx, meta.ProjectID, opt)
+	client, err := getGCPClient(ctx, meta, f.logger)
 	if err != nil {
 		return err
 	}
 
 	f.client = client
 	f.entityKind = meta.EntityKind
+	f.noIndex = meta.NoIndex
 
 	return nil
 }
@@ -93,12 +103,12 @@ func (f *Firestore) Features() []state.Feature {
 }
 
 // Get retrieves state from Firestore with a key (Always strong consistency).
-func (f *Firestore) Get(req *state.GetRequest) (*state.GetResponse, error) {
+func (f *Firestore) Get(ctx context.Context, req *state.GetRequest) (*state.GetResponse, error) {
 	key := req.Key
 
 	entityKey := datastore.NameKey(f.entityKind, key, nil)
 	var entity StateEntity
-	err := f.client.Get(context.Background(), entityKey, &entity)
+	err := f.client.Get(ctx, entityKey, &entity)
 
 	if err != nil && !errors.Is(err, datastore.ErrNoSuchEntity) {
 		return nil, err
@@ -111,7 +121,8 @@ func (f *Firestore) Get(req *state.GetRequest) (*state.GetResponse, error) {
 	}, nil
 }
 
-func (f *Firestore) setValue(req *state.SetRequest) error {
+// Set saves state into Firestore.
+func (f *Firestore) Set(ctx context.Context, req *state.SetRequest) error {
 	err := state.CheckRequestOptions(req.Options)
 	if err != nil {
 		return err
@@ -125,10 +136,16 @@ func (f *Firestore) setValue(req *state.SetRequest) error {
 		v, _ = jsoniter.MarshalToString(req.Value)
 	}
 
-	entity := &StateEntity{
-		Value: v,
+	var entity interface{}
+	if f.noIndex {
+		entity = &StateEntityNoIndex{
+			Value: v,
+		}
+	} else {
+		entity = &StateEntity{
+			Value: v,
+		}
 	}
-	ctx := context.Background()
 	key := datastore.NameKey(f.entityKind, req.Key, nil)
 
 	_, err = f.client.Put(ctx, key, entity)
@@ -140,17 +157,8 @@ func (f *Firestore) setValue(req *state.SetRequest) error {
 	return nil
 }
 
-// Set saves state into Firestore with retry.
-func (f *Firestore) Set(req *state.SetRequest) error {
-	return state.SetWithOptions(f.setValue, req)
-}
-
-func (f *Firestore) Ping() error {
-	return nil
-}
-
-func (f *Firestore) deleteValue(req *state.DeleteRequest) error {
-	ctx := context.Background()
+// Delete performs a delete operation.
+func (f *Firestore) Delete(ctx context.Context, req *state.DeleteRequest) error {
 	key := datastore.NameKey(f.entityKind, req.Key, nil)
 
 	err := f.client.Delete(ctx, key)
@@ -161,40 +169,92 @@ func (f *Firestore) deleteValue(req *state.DeleteRequest) error {
 	return nil
 }
 
-// Delete performs a delete operation.
-func (f *Firestore) Delete(req *state.DeleteRequest) error {
-	return state.DeleteWithOptions(f.deleteValue, req)
+func (f *Firestore) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := firestoreMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.StateStoreType)
+	return
 }
 
-func getFirestoreMetadata(metadata state.Metadata) (*firestoreMetadata, error) {
-	meta := firestoreMetadata{
+func getFirestoreMetadata(meta state.Metadata) (*firestoreMetadata, error) {
+	m := firestoreMetadata{
 		EntityKind: defaultEntityKind,
 	}
+
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
+	if err != nil {
+		return nil, err
+	}
+
 	requiredMetaProperties := []string{
-		"type", "project_id", "private_key_id", "private_key", "client_email", "client_id",
-		"auth_uri", "token_uri", "auth_provider_x509_cert_url", "client_x509_cert_url",
+		"project_id",
+	}
+
+	metadataMap := map[string]string{}
+	bytes, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	err = json.Unmarshal(bytes, &metadataMap)
+	if err != nil {
+		return nil, err
 	}
 
 	for _, k := range requiredMetaProperties {
-		if val, ok := metadata.Properties[k]; !ok || len(val) < 1 {
+		if val, ok := metadataMap[k]; !ok || len(val) < 1 {
 			return nil, fmt.Errorf("error parsing required field: %s", k)
 		}
 	}
 
-	meta.Type = metadata.Properties["type"]
-	meta.ProjectID = metadata.Properties["project_id"]
-	meta.PrivateKeyID = metadata.Properties["private_key_id"]
-	meta.PrivateKey = metadata.Properties["private_key"]
-	meta.ClientEmail = metadata.Properties["client_email"]
-	meta.ClientID = metadata.Properties["client_id"]
-	meta.AuthURI = metadata.Properties["auth_uri"]
-	meta.TokenURI = metadata.Properties["token_uri"]
-	meta.AuthProviderCertURL = metadata.Properties["auth_provider_x509_cert_url"]
-	meta.ClientCertURL = metadata.Properties["client_x509_cert_url"]
-
-	if val, ok := metadata.Properties["entity_kind"]; ok && val != "" {
-		meta.EntityKind = val
+	if val, found := meta.Properties[endpointKey]; found && val != "" {
+		m.ConnectionEndpoint = val
 	}
 
-	return &meta, nil
+	return &m, nil
+}
+
+func (f *Firestore) Close() error {
+	if f.client != nil {
+		return f.client.Close()
+	}
+
+	return nil
+}
+
+func getGCPClient(ctx context.Context, metadata *firestoreMetadata, l logger.Logger) (*datastore.Client, error) {
+	var gcpClient *datastore.Client
+	var err error
+
+	// context.Background is used here, as the context used to Dial the
+	// server in the gRPC DialPool. Callers should always call `Close` on the
+	// component to ensure all resources are released.
+	if metadata.PrivateKeyID != "" {
+		var b []byte
+		b, err = json.Marshal(metadata)
+		if err != nil {
+			return nil, err
+		}
+
+		opt := option.WithCredentialsJSON(b)
+		gcpClient, err = datastore.NewClient(context.Background(), metadata.ProjectID, opt)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		l.Debugf("Using implicit credentials for GCP")
+
+		// The following allows the Google SDK to connect to
+		// the GCP Datastore Emulator.
+		// example: export DATASTORE_EMULATOR_HOST=localhost:8432
+		// see: https://cloud.google.com/pubsub/docs/emulator#env
+		if metadata.ConnectionEndpoint != "" {
+			l.Debugf("setting GCP Datastore Emulator environment variable to 'DATASTORE_EMULATOR_HOST=%s'", metadata.ConnectionEndpoint)
+			os.Setenv("DATASTORE_EMULATOR_HOST", metadata.ConnectionEndpoint)
+		}
+		gcpClient, err = datastore.NewClient(context.Background(), metadata.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return gcpClient, nil
 }

@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Dapr Authors
+Copyright 2023 The Dapr Authors
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -65,14 +65,4 @@ func validateConsistencyOption(c string) error {
 	}
 
 	return nil
-}
-
-// SetWithOptions handles SetRequest with request options.
-func SetWithOptions(method func(req *SetRequest) error, req *SetRequest) error {
-	return method(req)
-}
-
-// DeleteWithOptions handles DeleteRequest with options.
-func DeleteWithOptions(method func(req *DeleteRequest) error, req *DeleteRequest) error {
-	return method(req)
 }

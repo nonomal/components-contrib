@@ -14,16 +14,21 @@ limitations under the License.
 package cassandra
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strconv"
-	"strings"
+	"time"
 
 	"github.com/gocql/gocql"
 	jsoniter "github.com/json-iterator/go"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/state"
+	stateutils "github.com/dapr/components-contrib/state/utils"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 const (
@@ -47,7 +52,8 @@ const (
 
 // Cassandra is a state store implementation for Apache Cassandra.
 type Cassandra struct {
-	state.DefaultBulkStore
+	state.BulkStore
+
 	session *gocql.Session
 	cluster *gocql.ClusterConfig
 	table   string
@@ -56,27 +62,28 @@ type Cassandra struct {
 }
 
 type cassandraMetadata struct {
-	hosts             []string
-	port              int
-	protoVersion      int
-	replicationFactor int
-	username          string
-	password          string
-	consistency       string
-	table             string
-	keyspace          string
+	Hosts             []string
+	Port              int
+	ProtoVersion      int
+	ReplicationFactor int
+	Username          string
+	Password          string
+	Consistency       string
+	Table             string
+	Keyspace          string
 }
 
 // NewCassandraStateStore returns a new cassandra state store.
-func NewCassandraStateStore(logger logger.Logger) *Cassandra {
-	s := &Cassandra{logger: logger}
-	s.DefaultBulkStore = state.NewDefaultBulkStore(s)
-
+func NewCassandraStateStore(logger logger.Logger) state.Store {
+	s := &Cassandra{
+		logger: logger,
+	}
+	s.BulkStore = state.NewDefaultBulkStore(s)
 	return s
 }
 
 // Init performs metadata and connection parsing.
-func (c *Cassandra) Init(metadata state.Metadata) error {
+func (c *Cassandra) Init(_ context.Context, metadata state.Metadata) error {
 	meta, err := getCassandraMetadata(metadata)
 	if err != nil {
 		return err
@@ -84,34 +91,36 @@ func (c *Cassandra) Init(metadata state.Metadata) error {
 
 	cluster, err := c.createClusterConfig(meta)
 	if err != nil {
-		return fmt.Errorf("error creating cluster config: %s", err)
+		return fmt.Errorf("error creating cluster config: %w", err)
 	}
 	c.cluster = cluster
 
 	session, err := cluster.CreateSession()
 	if err != nil {
-		return fmt.Errorf("error creating session: %s", err)
+		return fmt.Errorf("error creating session: %w", err)
 	}
 	c.session = session
 
-	err = c.tryCreateKeyspace(meta.keyspace, meta.replicationFactor)
+	err = c.tryCreateKeyspace(meta.Keyspace, meta.ReplicationFactor)
 	if err != nil {
-		return fmt.Errorf("error creating keyspace %s: %s", meta.table, err)
+		return fmt.Errorf("error creating keyspace %s: %w", meta.Keyspace, err)
 	}
 
-	err = c.tryCreateTable(meta.table, meta.keyspace)
+	err = c.tryCreateTable(meta.Table, meta.Keyspace)
 	if err != nil {
-		return fmt.Errorf("error creating keyspace %s: %s", meta.table, err)
+		return fmt.Errorf("error creating table %s: %w", meta.Table, err)
 	}
 
-	c.table = fmt.Sprintf("%s.%s", meta.keyspace, meta.table)
+	c.table = meta.Keyspace + "." + meta.Table
 
 	return nil
 }
 
 // Features returns the features available in this state store.
 func (c *Cassandra) Features() []state.Feature {
-	return nil
+	return []state.Feature{
+		state.FeatureTTL,
+	}
 }
 
 func (c *Cassandra) tryCreateKeyspace(keyspace string, replicationFactor int) error {
@@ -123,13 +132,13 @@ func (c *Cassandra) tryCreateTable(table, keyspace string) error {
 }
 
 func (c *Cassandra) createClusterConfig(metadata *cassandraMetadata) (*gocql.ClusterConfig, error) {
-	clusterConfig := gocql.NewCluster(metadata.hosts...)
-	if metadata.username != "" && metadata.password != "" {
-		clusterConfig.Authenticator = gocql.PasswordAuthenticator{Username: metadata.username, Password: metadata.password}
+	clusterConfig := gocql.NewCluster(metadata.Hosts...)
+	if metadata.Username != "" && metadata.Password != "" {
+		clusterConfig.Authenticator = gocql.PasswordAuthenticator{Username: metadata.Username, Password: metadata.Password}
 	}
-	clusterConfig.Port = metadata.port
-	clusterConfig.ProtoVersion = metadata.protoVersion
-	cons, err := c.getConsistency(metadata.consistency)
+	clusterConfig.Port = metadata.Port
+	clusterConfig.ProtoVersion = metadata.ProtoVersion
+	cons, err := c.getConsistency(metadata.Consistency)
 	if err != nil {
 		return nil, err
 	}
@@ -166,76 +175,58 @@ func (c *Cassandra) getConsistency(consistency string) (gocql.Consistency, error
 	return 0, fmt.Errorf("consistency mode %s not found", consistency)
 }
 
-func getCassandraMetadata(metadata state.Metadata) (*cassandraMetadata, error) {
-	meta := cassandraMetadata{
-		protoVersion:      defaultProtoVersion,
-		table:             defaultTable,
-		keyspace:          defaultKeyspace,
-		replicationFactor: defaultReplicationFactor,
-		consistency:       "All",
-		port:              defaultPort,
+func getCassandraMetadata(meta state.Metadata) (*cassandraMetadata, error) {
+	m := cassandraMetadata{
+		ProtoVersion:      defaultProtoVersion,
+		Table:             defaultTable,
+		Keyspace:          defaultKeyspace,
+		ReplicationFactor: defaultReplicationFactor,
+		Consistency:       "All",
+		Port:              defaultPort,
+	}
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
+	if err != nil {
+		return nil, err
 	}
 
-	if val, ok := metadata.Properties[hosts]; ok && val != "" {
-		meta.hosts = strings.Split(val, ",")
-	} else {
-		return nil, errors.New("missing or empty hosts field from metadata")
+	if m.Hosts == nil || len(m.Hosts) == 0 {
+		return nil, fmt.Errorf("missing or empty hosts field from metadata")
 	}
 
-	if val, ok := metadata.Properties[port]; ok && val != "" {
+	if val, ok := meta.Properties[port]; ok && val != "" {
 		p, err := strconv.ParseInt(val, 0, 32)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing port field: %s", err)
 		}
-		meta.port = int(p)
+		m.Port = int(p)
 	}
 
-	if val, ok := metadata.Properties[consistency]; ok && val != "" {
-		meta.consistency = val
-	}
-
-	if val, ok := metadata.Properties[table]; ok && val != "" {
-		meta.table = val
-	}
-
-	if val, ok := metadata.Properties[keyspace]; ok && val != "" {
-		meta.keyspace = val
-	}
-
-	if val, ok := metadata.Properties[username]; ok && val != "" {
-		meta.username = val
-	}
-
-	if val, ok := metadata.Properties[password]; ok && val != "" {
-		meta.password = val
-	}
-
-	if val, ok := metadata.Properties[protoVersion]; ok && val != "" {
+	if val, ok := meta.Properties[protoVersion]; ok && val != "" {
 		p, err := strconv.ParseInt(val, 0, 32)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing protoVersion field: %s", err)
 		}
-		meta.protoVersion = int(p)
+		m.ProtoVersion = int(p)
 	}
 
-	if val, ok := metadata.Properties[replicationFactor]; ok && val != "" {
+	if val, ok := meta.Properties[replicationFactor]; ok && val != "" {
 		r, err := strconv.ParseInt(val, 0, 32)
 		if err != nil {
 			return nil, fmt.Errorf("error parsing replicationFactor field: %s", err)
 		}
-		meta.replicationFactor = int(r)
+		m.ReplicationFactor = int(r)
 	}
 
-	return &meta, nil
+	return &m, nil
 }
 
 // Delete performs a delete operation.
-func (c *Cassandra) Delete(req *state.DeleteRequest) error {
-	return c.session.Query(fmt.Sprintf("DELETE FROM %s WHERE key = ?", c.table), req.Key).Exec()
+func (c *Cassandra) Delete(ctx context.Context, req *state.DeleteRequest) error {
+	return c.session.Query(fmt.Sprintf("DELETE FROM %s WHERE key = ?", c.table), req.Key).WithContext(ctx).Exec()
 }
 
 // Get retrieves state from cassandra with a key.
-func (c *Cassandra) Get(req *state.GetRequest) (*state.GetResponse, error) {
+func (c *Cassandra) Get(ctx context.Context, req *state.GetRequest) (*state.GetResponse, error) {
 	session := c.session
 
 	if req.Options.Consistency == state.Strong {
@@ -254,7 +245,8 @@ func (c *Cassandra) Get(req *state.GetRequest) (*state.GetResponse, error) {
 		session = sess
 	}
 
-	results, err := session.Query(fmt.Sprintf("SELECT value FROM %s WHERE key = ?", c.table), req.Key).Iter().SliceMap()
+	const selectQuery = "SELECT value, TTL(value) AS ttl, toTimestamp(now()) AS now FROM %s WHERE key = ?"
+	results, err := session.Query(fmt.Sprintf(selectQuery, c.table), req.Key).WithContext(ctx).Iter().SliceMap()
 	if err != nil {
 		return nil, err
 	}
@@ -263,13 +255,25 @@ func (c *Cassandra) Get(req *state.GetRequest) (*state.GetResponse, error) {
 		return &state.GetResponse{}, nil
 	}
 
+	var metadata map[string]string
+	if ttl := results[0]["ttl"].(int); ttl > 0 {
+		now, ok := results[0]["now"].(time.Time)
+		if !ok {
+			return nil, errors.New("failed to parse cassandra timestamp")
+		}
+		metadata = map[string]string{
+			state.GetRespMetaKeyTTLExpireTime: now.Add(time.Duration(ttl) * time.Second).UTC().Format(time.RFC3339),
+		}
+	}
+
 	return &state.GetResponse{
-		Data: results[0]["value"].([]byte),
+		Data:     results[0]["value"].([]byte),
+		Metadata: metadata,
 	}, nil
 }
 
 // Set saves state into cassandra.
-func (c *Cassandra) Set(req *state.SetRequest) error {
+func (c *Cassandra) Set(ctx context.Context, req *state.SetRequest) error {
 	var bt []byte
 	b, ok := req.Value.([]byte)
 	if ok {
@@ -296,20 +300,16 @@ func (c *Cassandra) Set(req *state.SetRequest) error {
 		session = sess
 	}
 
-	ttl, err := parseTTL(req.Metadata)
+	ttl, err := stateutils.ParseTTL(req.Metadata)
 	if err != nil {
 		return fmt.Errorf("error parsing TTL from Metadata: %s", err)
 	}
 
 	if ttl != nil {
-		return session.Query(fmt.Sprintf("INSERT INTO %s (key, value) VALUES (?, ?) USING TTL ?", c.table), req.Key, bt, *ttl).Exec()
+		return session.Query(fmt.Sprintf("INSERT INTO %s (key, value) VALUES (?, ?) USING TTL ?", c.table), req.Key, bt, *ttl).WithContext(ctx).Exec()
 	}
 
-	return session.Query(fmt.Sprintf("INSERT INTO %s (key, value) VALUES (?, ?)", c.table), req.Key, bt).Exec()
-}
-
-func (c *Cassandra) Ping() error {
-	return nil
+	return session.Query(fmt.Sprintf("INSERT INTO %s (key, value) VALUES (?, ?)", c.table), req.Key, bt).WithContext(ctx).Exec()
 }
 
 func (c *Cassandra) createSession(consistency gocql.Consistency) (*gocql.Session, error) {
@@ -323,16 +323,19 @@ func (c *Cassandra) createSession(consistency gocql.Consistency) (*gocql.Session
 	return session, nil
 }
 
-func parseTTL(requestMetadata map[string]string) (*int, error) {
-	if val, found := requestMetadata[metadataTTLKey]; found && val != "" {
-		parsedVal, err := strconv.ParseInt(val, 10, 0)
-		if err != nil {
-			return nil, err
-		}
-		parsedInt := int(parsedVal)
+func (c *Cassandra) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := cassandraMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.StateStoreType)
+	return
+}
 
-		return &parsedInt, nil
+// Close the connection to Cassandra.
+func (c *Cassandra) Close() error {
+	if c.session == nil {
+		return nil
 	}
 
-	return nil, nil
+	c.session.Close()
+
+	return nil
 }

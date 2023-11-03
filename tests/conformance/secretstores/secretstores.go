@@ -14,11 +14,12 @@ limitations under the License.
 package secretstores
 
 import (
-	"os"
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/secretstores"
 	"github.com/dapr/components-contrib/tests/conformance/utils"
 )
@@ -28,12 +29,11 @@ type TestConfig struct {
 	utils.CommonConfig
 }
 
-func NewTestConfig(name string, allOperations bool, operations []string) TestConfig {
+func NewTestConfig(name string, operations []string) TestConfig {
 	tc := TestConfig{
 		CommonConfig: utils.CommonConfig{
 			ComponentType: "secretstores",
 			ComponentName: name,
-			AllOperations: allOperations,
 			Operations:    utils.NewStringSet(operations...),
 		},
 	}
@@ -44,19 +44,31 @@ func NewTestConfig(name string, allOperations bool, operations []string) TestCon
 func ConformanceTests(t *testing.T, props map[string]string, store secretstores.SecretStore, config TestConfig) {
 	// TODO add support for metadata
 	// For local env var based component test
-	os.Setenv("conftestsecret", "abcd")
-	defer os.Unsetenv("conftestsecret")
+	t.Setenv("conftestsecret", "abcd")
+	t.Setenv("secondsecret", "efgh")
 
 	// Init
 	t.Run("init", func(t *testing.T) {
-		err := store.Init(secretstores.Metadata{
+		err := store.Init(context.Background(), secretstores.Metadata{Base: metadata.Base{
 			Properties: props,
-		})
+		}})
 		assert.NoError(t, err, "expected no error on initializing store")
 	})
 
+	t.Run("ping", func(t *testing.T) {
+		err := secretstores.Ping(context.Background(), store)
+		// TODO: Ideally, all stable components should implenment ping function,
+		// so will only assert assert.Nil(t, err) finally, i.e. when current implementation
+		// implements ping in existing stable components
+		if err != nil {
+			assert.EqualError(t, err, "ping is not implemented by this secret store")
+		} else {
+			assert.Nil(t, err)
+		}
+	})
+
 	// Get
-	if config.HasOperation("get") {
+	t.Run("get", func(t *testing.T) {
 		getSecretRequest := secretstores.GetSecretRequest{
 			Name: "conftestsecret",
 		}
@@ -67,16 +79,16 @@ func ConformanceTests(t *testing.T, props map[string]string, store secretstores.
 		}
 
 		t.Run("get", func(t *testing.T) {
-			resp, err := store.GetSecret(getSecretRequest)
+			resp, err := store.GetSecret(context.Background(), getSecretRequest)
 			assert.NoError(t, err, "expected no error on getting secret %v", getSecretRequest)
 			assert.NotNil(t, resp, "expected value to be returned")
 			assert.NotNil(t, resp.Data, "expected value to be returned")
 			assert.Equal(t, getSecretResponse.Data, resp.Data, "expected values to be equal")
 		})
-	}
+	})
 
 	// Bulkget
-	if config.HasOperation("bulkget") {
+	t.Run("bulkGet", func(t *testing.T) {
 		bulkReq := secretstores.BulkGetSecretRequest{}
 		expectedData := map[string]map[string]string{
 			"conftestsecret": {
@@ -88,7 +100,7 @@ func ConformanceTests(t *testing.T, props map[string]string, store secretstores.
 		}
 
 		t.Run("bulkget", func(t *testing.T) {
-			resp, err := store.BulkGetSecret(bulkReq)
+			resp, err := store.BulkGetSecret(context.Background(), bulkReq)
 			assert.NoError(t, err, "expected no error on getting secret %v", bulkReq)
 			assert.NotNil(t, resp, "expected value to be returned")
 			assert.NotNil(t, resp.Data, "expected value to be returned")
@@ -104,5 +116,5 @@ func ConformanceTests(t *testing.T, props map[string]string, store secretstores.
 				assert.Equal(t, m, resp.Data[k], "expected values to be equal")
 			}
 		})
-	}
+	})
 }

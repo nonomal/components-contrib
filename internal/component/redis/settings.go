@@ -77,6 +77,25 @@ type Settings struct {
 
 	// A flag to enables TLS by setting InsecureSkipVerify to true
 	EnableTLS bool `mapstructure:"enableTLS"`
+
+	// == state only properties ==
+	TTLInSeconds *int   `mapstructure:"ttlInSeconds" mdonly:"state"`
+	QueryIndexes string `mapstructure:"queryIndexes" mdonly:"state"`
+
+	// == pubsub only properties ==
+	// The consumer identifier
+	ConsumerID string `mapstructure:"consumerID" mdonly:"pubsub"`
+	// The interval between checking for pending messages to redelivery (0 disables redelivery)
+	RedeliverInterval time.Duration `mapstructure:"-" mdonly:"pubsub"`
+	// The amount time a message must be pending before attempting to redeliver it (0 disables redelivery)
+	ProcessingTimeout time.Duration `mapstructure:"processingTimeout" mdonly:"pubsub"`
+	// The size of the message queue for processing
+	QueueDepth uint `mapstructure:"queueDepth" mdonly:"pubsub"`
+	// The number of concurrent workers that are processing messages
+	Concurrency uint `mapstructure:"concurrency" mdonly:"pubsub"`
+
+	// The max len of stream
+	MaxLenApprox int64 `mapstructure:"maxLenApprox" mdonly:"pubsub"`
 }
 
 func (s *Settings) Decode(in interface{}) error {

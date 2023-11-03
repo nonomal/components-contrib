@@ -20,11 +20,13 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 
+	internalredis "github.com/dapr/components-contrib/internal/component/redis"
+	mdata "github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/pubsub"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 func getFakeProperties() map[string]string {
@@ -40,31 +42,33 @@ func TestParseRedisMetadata(t *testing.T) {
 		fakeProperties := getFakeProperties()
 
 		fakeMetaData := pubsub.Metadata{
-			Properties: fakeProperties,
+			Base: mdata.Base{Properties: fakeProperties},
 		}
 
 		// act
-		m, err := parseRedisMetadata(fakeMetaData)
+		m := internalredis.Settings{}
+		err := kitmd.DecodeMetadata(fakeMetaData, &m)
 
 		// assert
 		assert.NoError(t, err)
-		assert.Equal(t, fakeProperties[consumerID], m.consumerID)
-		assert.Equal(t, int64(1000), m.maxLenApprox)
+		assert.Equal(t, fakeProperties[consumerID], m.ConsumerID)
+		assert.Equal(t, int64(1000), m.MaxLenApprox)
 	})
 
 	t.Run("consumerID is not given", func(t *testing.T) {
 		fakeProperties := getFakeProperties()
 
 		fakeMetaData := pubsub.Metadata{
-			Properties: fakeProperties,
+			Base: mdata.Base{Properties: fakeProperties},
 		}
 		fakeMetaData.Properties[consumerID] = ""
 
 		// act
-		m, err := parseRedisMetadata(fakeMetaData)
+		m := internalredis.Settings{}
+		err := kitmd.DecodeMetadata(fakeMetaData, &m)
 		// assert
 		assert.Error(t, errors.New("redis streams error: missing consumerID"), err)
-		assert.Empty(t, m.consumerID)
+		assert.Empty(t, m.ConsumerID)
 	})
 }
 
@@ -93,11 +97,13 @@ func TestProcessStreams(t *testing.T) {
 	}
 
 	// act
-	testRedisStream := &redisStreams{logger: logger.NewLogger("test")}
-	testRedisStream.ctx, testRedisStream.cancel = context.WithCancel(context.Background())
+	testRedisStream := &redisStreams{
+		logger:         logger.NewLogger("test"),
+		clientSettings: &internalredis.Settings{},
+	}
 	testRedisStream.queue = make(chan redisMessageWrapper, 10)
 	go testRedisStream.worker()
-	testRedisStream.enqueueMessages(fakeConsumerID, fakeHandler, generateRedisStreamTestData(2, 3, expectedData))
+	testRedisStream.enqueueMessages(context.Background(), fakeConsumerID, fakeHandler, generateRedisStreamTestData(2, 3, expectedData))
 
 	// Wait for the handler to finish processing
 	wg.Wait()
@@ -107,9 +113,9 @@ func TestProcessStreams(t *testing.T) {
 	assert.Equal(t, 3, messageCount)
 }
 
-func generateRedisStreamTestData(topicCount, messageCount int, data string) []redis.XMessage {
-	generateXMessage := func(id int) redis.XMessage {
-		return redis.XMessage{
+func generateRedisStreamTestData(topicCount, messageCount int, data string) []internalredis.RedisXMessage {
+	generateXMessage := func(id int) internalredis.RedisXMessage {
+		return internalredis.RedisXMessage{
 			ID: fmt.Sprintf("%d", id),
 			Values: map[string]interface{}{
 				"data": data,
@@ -117,7 +123,7 @@ func generateRedisStreamTestData(topicCount, messageCount int, data string) []re
 		}
 	}
 
-	xmessageArray := make([]redis.XMessage, messageCount)
+	xmessageArray := make([]internalredis.RedisXMessage, messageCount)
 	for i := range xmessageArray {
 		xmessageArray[i] = generateXMessage(i)
 	}

@@ -14,14 +14,14 @@ limitations under the License.
 package zeebe
 
 import (
-	"encoding/json"
 	"errors"
+	"time"
 
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/zbc"
 
 	"github.com/dapr/components-contrib/bindings"
-	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 var ErrMissingGatewayAddr = errors.New("gatewayAddr is a required attribute")
@@ -36,11 +36,11 @@ type ClientFactoryImpl struct {
 }
 
 // https://docs.zeebe.io/operations/authentication.html
-type clientMetadata struct {
-	GatewayAddr            string            `json:"gatewayAddr"`
-	GatewayKeepAlive       metadata.Duration `json:"gatewayKeepAlive"`
-	CaCertificatePath      string            `json:"caCertificatePath"`
-	UsePlaintextConnection bool              `json:"usePlainTextConnection,string"`
+type ClientMetadata struct {
+	GatewayAddr            string        `json:"gatewayAddr" mapstructure:"gatewayAddr"`
+	GatewayKeepAlive       time.Duration `json:"gatewayKeepAlive" mapstructure:"gatewayKeepAlive"`
+	CaCertificatePath      string        `json:"caCertificatePath" mapstructure:"caCertificatePath"`
+	UsePlaintextConnection bool          `json:"usePlainTextConnection,string" mapstructure:"usePlainTextConnection"`
 }
 
 // NewClientFactoryImpl returns a new ClientFactory instance.
@@ -58,7 +58,7 @@ func (c *ClientFactoryImpl) Get(metadata bindings.Metadata) (zbc.Client, error) 
 		GatewayAddress:         meta.GatewayAddr,
 		UsePlaintextConnection: meta.UsePlaintextConnection,
 		CaCertificatePath:      meta.CaCertificatePath,
-		KeepAlive:              meta.GatewayKeepAlive.Duration,
+		KeepAlive:              meta.GatewayKeepAlive,
 	})
 	if err != nil {
 		return nil, err
@@ -67,14 +67,9 @@ func (c *ClientFactoryImpl) Get(metadata bindings.Metadata) (zbc.Client, error) 
 	return client, nil
 }
 
-func (c *ClientFactoryImpl) parseMetadata(metadata bindings.Metadata) (*clientMetadata, error) {
-	b, err := json.Marshal(metadata.Properties)
-	if err != nil {
-		return nil, err
-	}
-
-	var m clientMetadata
-	err = json.Unmarshal(b, &m)
+func (c *ClientFactoryImpl) parseMetadata(meta bindings.Metadata) (*ClientMetadata, error) {
+	var m ClientMetadata
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
 	if err != nil {
 		return nil, err
 	}

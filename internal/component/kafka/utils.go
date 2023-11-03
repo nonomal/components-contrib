@@ -19,7 +19,16 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
+)
+
+const (
+	// DefaultMaxBulkSubCount is the default max bulk count for kafka pubsub component
+	// if the MaxBulkCountKey is not set in the metadata.
+	DefaultMaxBulkSubCount = 80
+	// DefaultMaxBulkSubAwaitDurationMs is the default max bulk await duration for kafka pubsub component
+	// if the MaxBulkAwaitDurationKey is not set in the metadata.
+	DefaultMaxBulkSubAwaitDurationMs = 10000
 )
 
 // asBase64String implements the `fmt.Stringer` interface in order to print
@@ -50,4 +59,18 @@ func isValidPEM(val string) bool {
 	block, _ := pem.Decode([]byte(val))
 
 	return block != nil
+}
+
+// TopicHandlerConfig is the map of topics and sruct containing handler and their config.
+type TopicHandlerConfig map[string]SubscriptionHandlerConfig
+
+// // TopicList returns the list of topics
+func (tbh TopicHandlerConfig) TopicList() []string {
+	topics := make([]string, len(tbh))
+	i := 0
+	for topic := range tbh {
+		topics[i] = topic
+		i++
+	}
+	return topics
 }

@@ -15,14 +15,20 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"reflect"
+	"sync"
+	"sync/atomic"
 	"time"
 
-	"github.com/pkg/errors"
-	cron "github.com/robfig/cron/v3"
+	"k8s.io/utils/clock"
 
 	"github.com/dapr/components-contrib/bindings"
+	contribMetadata "github.com/dapr/components-contrib/metadata"
+	cron "github.com/dapr/kit/cron"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 // Binding represents Cron input binding.
@@ -31,51 +37,66 @@ type Binding struct {
 	name     string
 	schedule string
 	parser   cron.Parser
+	clk      clock.Clock
+	closed   atomic.Bool
+	closeCh  chan struct{}
+	wg       sync.WaitGroup
 }
 
-var (
-	_      = bindings.InputBinding(&Binding{})
-	stopCh = make(map[string]chan bool)
-)
+type metadata struct {
+	Schedule string
+}
 
 // NewCron returns a new Cron event input binding.
-func NewCron(logger logger.Logger) *Binding {
+func NewCron(logger logger.Logger) bindings.InputBinding {
+	return NewCronWithClock(logger, clock.RealClock{})
+}
+
+func NewCronWithClock(logger logger.Logger, clk clock.Clock) bindings.InputBinding {
 	return &Binding{
 		logger: logger,
+		clk:    clk,
 		parser: cron.NewParser(
 			cron.SecondOptional | cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor,
 		),
+		closeCh: make(chan struct{}),
 	}
 }
 
 // Init initializes the Cron binding
 // Examples from https://godoc.org/github.com/robfig/cron:
-//   "15 * * * * *" - Every 15 sec
-//   "0 30 * * * *" - Every 30 min
-func (b *Binding) Init(metadata bindings.Metadata) error {
-	if _, ok := stopCh[metadata.Name]; !ok {
-		stopCh[metadata.Name] = make(chan bool)
+//
+//	"15 * * * * *" - Every 15 sec
+//	"0 30 * * * *" - Every 30 min
+func (b *Binding) Init(ctx context.Context, meta bindings.Metadata) error {
+	b.name = meta.Name
+	m := metadata{}
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
+	if err != nil {
+		return err
 	}
-	b.name = metadata.Name
-	s, f := metadata.Properties["schedule"]
-	if !f || s == "" {
+	if m.Schedule == "" {
 		return fmt.Errorf("schedule not set")
 	}
-	_, err := b.parser.Parse(s)
+	_, err = b.parser.Parse(m.Schedule)
 	if err != nil {
-		return errors.Wrapf(err, "invalid schedule format: %s", s)
+		return fmt.Errorf("invalid schedule format '%s': %w", m.Schedule, err)
 	}
-	b.schedule = s
+	b.schedule = m.Schedule
 
 	return nil
 }
 
 // Read triggers the Cron scheduler.
-func (b *Binding) Read(handler func(context.Context, *bindings.ReadResponse) ([]byte, error)) error {
-	c := cron.New(cron.WithParser(b.parser))
+func (b *Binding) Read(ctx context.Context, handler bindings.Handler) error {
+	if b.closed.Load() {
+		return errors.New("binding is closed")
+	}
+
+	c := cron.New(cron.WithParser(b.parser), cron.WithClock(b.clk))
 	id, err := c.AddFunc(b.schedule, func() {
 		b.logger.Debugf("name: %s, schedule fired: %v", b.name, time.Now())
-		handler(context.TODO(), &bindings.ReadResponse{
+		handler(ctx, &bindings.ReadResponse{
 			Metadata: map[string]string{
 				"timeZone":    c.Location().String(),
 				"readTimeUTC": time.Now().UTC().String(),
@@ -83,37 +104,37 @@ func (b *Binding) Read(handler func(context.Context, *bindings.ReadResponse) ([]
 		})
 	})
 	if err != nil {
-		return errors.Wrapf(err, "name: %s, error scheduling %s", b.name, b.schedule)
+		return fmt.Errorf("name: %s, error scheduling %s: %w", b.name, b.schedule, err)
 	}
 	c.Start()
 	b.logger.Debugf("name: %s, next run: %v", b.name, time.Until(c.Entry(id).Next))
-	<-stopCh[b.name]
-	b.logger.Debugf("name: %s, stopping schedule: %s", b.name, b.schedule)
-	c.Stop()
+
+	b.wg.Add(1)
+	go func() {
+		defer b.wg.Done()
+		// Wait for context to be canceled or component to be closed.
+		select {
+		case <-ctx.Done():
+		case <-b.closeCh:
+		}
+		b.logger.Debugf("name: %s, stopping schedule: %s", b.name, b.schedule)
+		c.Stop()
+	}()
 
 	return nil
 }
 
-// Invoke exposes way to stop previously started cron.
-func (b *Binding) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
-	b.logger.Debugf("name: %s, operation: %v", b.name, req.Operation)
-	if req.Operation != bindings.DeleteOperation {
-		return nil, fmt.Errorf("invalid operation: '%v', only '%v' supported",
-			req.Operation, bindings.DeleteOperation)
+func (b *Binding) Close() error {
+	if b.closed.CompareAndSwap(false, true) {
+		close(b.closeCh)
 	}
-	stopCh[b.name] <- true
-
-	return &bindings.InvokeResponse{
-		Metadata: map[string]string{
-			"schedule":    b.schedule,
-			"stopTimeUTC": time.Now().UTC().String(),
-		},
-	}, nil
+	b.wg.Wait()
+	return nil
 }
 
-// Operations method returns the supported operations by this binding.
-func (b *Binding) Operations() []bindings.OperationKind {
-	return []bindings.OperationKind{
-		bindings.DeleteOperation,
-	}
+// GetComponentMetadata returns the metadata of the component.
+func (b *Binding) GetComponentMetadata() (metadataInfo contribMetadata.MetadataMap) {
+	metadataStruct := metadata{}
+	contribMetadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, contribMetadata.BindingType)
+	return
 }

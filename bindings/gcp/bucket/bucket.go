@@ -14,12 +14,14 @@ limitations under the License.
 package bucket
 
 import (
+	"bytes"
 	"context"
 	b64 "encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/url"
+	"reflect"
 	"strconv"
 
 	"cloud.google.com/go/storage"
@@ -28,7 +30,10 @@ import (
 	"google.golang.org/api/option"
 
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
+	"github.com/dapr/kit/utils"
 )
 
 const (
@@ -50,19 +55,21 @@ type GCPStorage struct {
 }
 
 type gcpMetadata struct {
-	Bucket              string `json:"bucket"`
-	Type                string `json:"type"`
-	ProjectID           string `json:"project_id"`
-	PrivateKeyID        string `json:"private_key_id"`
-	PrivateKey          string `json:"private_key"`
-	ClientEmail         string `json:"client_email"`
-	ClientID            string `json:"client_id"`
-	AuthURI             string `json:"auth_uri"`
-	TokenURI            string `json:"token_uri"`
-	AuthProviderCertURL string `json:"auth_provider_x509_cert_url"`
-	ClientCertURL       string `json:"client_x509_cert_url"`
-	DecodeBase64        bool   `json:"decodeBase64,string"`
-	EncodeBase64        bool   `json:"encodeBase64,string"`
+	// Ignored by metadata parser because included in built-in authentication profile
+	Type                string `json:"type" mapstructure:"type" mdignore:"true"`
+	ProjectID           string `json:"project_id" mapstructure:"projectID" mdignore:"true" mapstructurealiases:"project_id"`
+	PrivateKeyID        string `json:"private_key_id" mapstructure:"privateKeyID" mdignore:"true" mapstructurealiases:"private_key_id"`
+	PrivateKey          string `json:"private_key" mapstructure:"privateKey" mdignore:"true" mapstructurealiases:"private_key"`
+	ClientEmail         string `json:"client_email" mapstructure:"clientEmail" mdignore:"true" mapstructurealiases:"client_email"`
+	ClientID            string `json:"client_id" mapstructure:"clientID" mdignore:"true" mapstructurealiases:"client_id"`
+	AuthURI             string `json:"auth_uri" mapstructure:"authURI" mdignore:"true" mapstructurealiases:"auth_uri"`
+	TokenURI            string `json:"token_uri" mapstructure:"tokenURI" mdignore:"true" mapstructurealiases:"token_uri"`
+	AuthProviderCertURL string `json:"auth_provider_x509_cert_url" mapstructure:"authProviderX509CertURL" mdignore:"true" mapstructurealiases:"auth_provider_x509_cert_url"`
+	ClientCertURL       string `json:"client_x509_cert_url" mapstructure:"clientX509CertURL" mdignore:"true" mapstructurealiases:"client_x509_cert_url"`
+
+	Bucket       string `json:"bucket" mapstructure:"bucket"`
+	DecodeBase64 bool   `json:"decodeBase64,string" mapstructure:"decodeBase64"`
+	EncodeBase64 bool   `json:"encodeBase64,string" mapstructure:"encodeBase64"`
 }
 
 type listPayload struct {
@@ -76,19 +83,23 @@ type createResponse struct {
 }
 
 // NewGCPStorage returns a new GCP storage instance.
-func NewGCPStorage(logger logger.Logger) *GCPStorage {
+func NewGCPStorage(logger logger.Logger) bindings.OutputBinding {
 	return &GCPStorage{logger: logger}
 }
 
 // Init performs connection parsing.
-func (g *GCPStorage) Init(metadata bindings.Metadata) error {
-	m, b, err := g.parseMetadata(metadata)
+func (g *GCPStorage) Init(ctx context.Context, metadata bindings.Metadata) error {
+	m, err := g.parseMetadata(metadata)
+	if err != nil {
+		return err
+	}
+
+	b, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
 
 	clientOptions := option.WithCredentialsJSON(b)
-	ctx := context.Background()
 	client, err := storage.NewClient(ctx, clientOptions)
 	if err != nil {
 		return err
@@ -100,19 +111,14 @@ func (g *GCPStorage) Init(metadata bindings.Metadata) error {
 	return nil
 }
 
-func (g *GCPStorage) parseMetadata(metadata bindings.Metadata) (*gcpMetadata, []byte, error) {
-	b, err := json.Marshal(metadata.Properties)
+func (g *GCPStorage) parseMetadata(meta bindings.Metadata) (*gcpMetadata, error) {
+	m := gcpMetadata{}
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	var m gcpMetadata
-	err = json.Unmarshal(b, &m)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return &m, b, nil
+	return &m, nil
 }
 
 func (g *GCPStorage) Operations() []bindings.OperationKind {
@@ -161,17 +167,14 @@ func (g *GCPStorage) create(ctx context.Context, req *bindings.InvokeRequest) (*
 		req.Data = []byte(d)
 	}
 
+	var r io.Reader = bytes.NewReader(req.Data)
 	if metadata.DecodeBase64 {
-		decoded, decodeError := b64.StdEncoding.DecodeString(string(req.Data))
-		if decodeError != nil {
-			return nil, fmt.Errorf("gcp bucket binding error. decode : %w", decodeError)
-		}
-		req.Data = decoded
+		r = b64.NewDecoder(b64.StdEncoding, r)
 	}
 
 	h := g.client.Bucket(g.metadata.Bucket).Object(name).NewWriter(ctx)
 	defer h.Close()
-	if _, err = h.Write(req.Data); err != nil {
+	if _, err = io.Copy(h, r); err != nil {
 		return nil, fmt.Errorf("gcp bucket binding error. Uploading: %w", err)
 	}
 
@@ -197,7 +200,7 @@ func (g *GCPStorage) create(ctx context.Context, req *bindings.InvokeRequest) (*
 func (g *GCPStorage) get(ctx context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
 	metadata, err := g.metadata.mergeWithRequestMetadata(req)
 	if err != nil {
-		return nil, fmt.Errorf("gcp binding binding error. error merge metadata : %w", err)
+		return nil, fmt.Errorf("gcp binding error. error merge metadata : %w", err)
 	}
 
 	var key string
@@ -207,15 +210,16 @@ func (g *GCPStorage) get(ctx context.Context, req *bindings.InvokeRequest) (*bin
 		return nil, fmt.Errorf("gcp bucket binding error: can't read key value")
 	}
 
-	rc, err := g.client.Bucket(g.metadata.Bucket).Object(key).NewReader(ctx)
+	var rc io.ReadCloser
+	rc, err = g.client.Bucket(g.metadata.Bucket).Object(key).NewReader(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("gcp bucketgcp bucket binding error: error downloading bucket object: %w", err)
 	}
 	defer rc.Close()
 
-	data, err := ioutil.ReadAll(rc)
+	data, err := io.ReadAll(rc)
 	if err != nil {
-		return nil, fmt.Errorf("gcp bucketgcp bucket binding error: ioutil.ReadAll: %v", err)
+		return nil, fmt.Errorf("gcp bucketgcp bucket binding error: io.ReadAll: %v", err)
 	}
 
 	if metadata.EncodeBase64 {
@@ -289,19 +293,11 @@ func (metadata gcpMetadata) mergeWithRequestMetadata(req *bindings.InvokeRequest
 	merged := metadata
 
 	if val, ok := req.Metadata[metadataDecodeBase64]; ok && val != "" {
-		valBool, err := strconv.ParseBool(val)
-		if err != nil {
-			return merged, err
-		}
-		merged.DecodeBase64 = valBool
+		merged.DecodeBase64 = utils.IsTruthy(val)
 	}
 
 	if val, ok := req.Metadata[metadataEncodeBase64]; ok && val != "" {
-		valBool, err := strconv.ParseBool(val)
-		if err != nil {
-			return merged, err
-		}
-		merged.EncodeBase64 = valBool
+		merged.EncodeBase64 = utils.IsTruthy(val)
 	}
 
 	return merged, nil
@@ -315,4 +311,11 @@ func (g *GCPStorage) handleBackwardCompatibilityForMetadata(metadata map[string]
 	}
 
 	return metadata
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (g *GCPStorage) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := gcpMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.BindingType)
+	return
 }

@@ -17,12 +17,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 
 	"github.com/aws/aws-sdk-go/service/sns"
 
-	aws_auth "github.com/dapr/components-contrib/authentication/aws"
 	"github.com/dapr/components-contrib/bindings"
+	awsAuth "github.com/dapr/components-contrib/internal/authentication/aws"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 // AWSSNS is an AWS SNS binding.
@@ -48,12 +51,12 @@ type dataPayload struct {
 }
 
 // NewAWSSNS creates a new AWSSNS binding instance.
-func NewAWSSNS(logger logger.Logger) *AWSSNS {
+func NewAWSSNS(logger logger.Logger) bindings.OutputBinding {
 	return &AWSSNS{logger: logger}
 }
 
 // Init does metadata parsing.
-func (a *AWSSNS) Init(metadata bindings.Metadata) error {
+func (a *AWSSNS) Init(_ context.Context, metadata bindings.Metadata) error {
 	m, err := a.parseMetadata(metadata)
 	if err != nil {
 		return err
@@ -68,14 +71,9 @@ func (a *AWSSNS) Init(metadata bindings.Metadata) error {
 	return nil
 }
 
-func (a *AWSSNS) parseMetadata(metadata bindings.Metadata) (*snsMetadata, error) {
-	b, err := json.Marshal(metadata.Properties)
-	if err != nil {
-		return nil, err
-	}
-
-	var m snsMetadata
-	err = json.Unmarshal(b, &m)
+func (a *AWSSNS) parseMetadata(meta bindings.Metadata) (*snsMetadata, error) {
+	m := snsMetadata{}
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
 	if err != nil {
 		return nil, err
 	}
@@ -84,7 +82,7 @@ func (a *AWSSNS) parseMetadata(metadata bindings.Metadata) (*snsMetadata, error)
 }
 
 func (a *AWSSNS) getClient(metadata *snsMetadata) (*sns.SNS, error) {
-	sess, err := aws_auth.GetClient(metadata.AccessKey, metadata.SecretKey, metadata.SessionToken, metadata.Region, metadata.Endpoint)
+	sess, err := awsAuth.GetClient(metadata.AccessKey, metadata.SecretKey, metadata.SessionToken, metadata.Region, metadata.Endpoint)
 	if err != nil {
 		return nil, err
 	}
@@ -107,16 +105,21 @@ func (a *AWSSNS) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*bind
 	msg := fmt.Sprintf("%v", payload.Message)
 	subject := fmt.Sprintf("%v", payload.Subject)
 
-	input := &sns.PublishInput{
+	_, err = a.client.PublishWithContext(ctx, &sns.PublishInput{
 		Message:  &msg,
 		Subject:  &subject,
 		TopicArn: &a.topicARN,
-	}
-
-	_, err = a.client.Publish(input)
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	return nil, nil
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (a *AWSSNS) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := snsMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.BindingType)
+	return
 }

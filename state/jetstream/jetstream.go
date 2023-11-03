@@ -14,34 +14,41 @@ limitations under the License.
 package jetstream
 
 import (
-	"fmt"
+	"context"
+	"errors"
+	"io"
+	"reflect"
 	"strings"
+	"sync/atomic"
 
 	jsoniter "github.com/json-iterator/go"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/state"
 	"github.com/dapr/components-contrib/state/utils"
 	"github.com/dapr/kit/logger"
-
-	"github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 // StateStore is a nats jetstream KV state store.
 type StateStore struct {
-	state.DefaultBulkStore
+	state.BulkStore
+
 	nc     *nats.Conn
 	json   jsoniter.API
 	bucket nats.KeyValue
 	logger logger.Logger
+	closed atomic.Bool
 }
 
 type jetstreamMetadata struct {
-	name    string
-	natsURL string
-	jwt     string
-	seedKey string
-	bucket  string
+	Name    string
+	NatsURL string
+	Jwt     string
+	SeedKey string
+	Bucket  string
 }
 
 // NewJetstreamStateStore returns a new nats jetstream KV state store.
@@ -50,31 +57,30 @@ func NewJetstreamStateStore(logger logger.Logger) state.Store {
 		json:   jsoniter.ConfigFastest,
 		logger: logger,
 	}
-	s.DefaultBulkStore = state.NewDefaultBulkStore(s)
-
+	s.BulkStore = state.NewDefaultBulkStore(s)
 	return s
 }
 
 // Init does parse metadata and establishes connection to nats broker.
-func (js *StateStore) Init(metadata state.Metadata) error {
+func (js *StateStore) Init(_ context.Context, metadata state.Metadata) error {
 	meta, err := js.getMetadata(metadata)
 	if err != nil {
 		return err
 	}
 
 	var opts []nats.Option
-	opts = append(opts, nats.Name(meta.name))
+	opts = append(opts, nats.Name(meta.Name))
 
 	// Set nats.UserJWT options when jwt and seed key is provided.
-	if meta.jwt != "" && meta.seedKey != "" {
+	if meta.Jwt != "" && meta.SeedKey != "" {
 		opts = append(opts, nats.UserJWT(func() (string, error) {
-			return meta.jwt, nil
+			return meta.Jwt, nil
 		}, func(nonce []byte) ([]byte, error) {
-			return sigHandler(meta.seedKey, nonce)
+			return sigHandler(meta.SeedKey, nonce)
 		}))
 	}
 
-	js.nc, err = nats.Connect(meta.natsURL, opts...)
+	js.nc, err = nats.Connect(meta.NatsURL, opts...)
 	if err != nil {
 		return err
 	}
@@ -84,15 +90,11 @@ func (js *StateStore) Init(metadata state.Metadata) error {
 		return err
 	}
 
-	js.bucket, err = jsc.KeyValue(meta.bucket)
+	js.bucket, err = jsc.KeyValue(meta.Bucket)
 	if err != nil {
 		return err
 	}
 
-	return nil
-}
-
-func (js *StateStore) Ping() error {
 	return nil
 }
 
@@ -101,7 +103,7 @@ func (js *StateStore) Features() []state.Feature {
 }
 
 // Get retrieves state with a key.
-func (js *StateStore) Get(req *state.GetRequest) (*state.GetResponse, error) {
+func (js *StateStore) Get(ctx context.Context, req *state.GetRequest) (*state.GetResponse, error) {
 	entry, err := js.bucket.Get(escape(req.Key))
 	if err != nil {
 		return nil, err
@@ -113,43 +115,42 @@ func (js *StateStore) Get(req *state.GetRequest) (*state.GetResponse, error) {
 }
 
 // Set stores value for a key.
-func (js *StateStore) Set(req *state.SetRequest) error {
+func (js *StateStore) Set(ctx context.Context, req *state.SetRequest) error {
 	bt, _ := utils.Marshal(req.Value, js.json.Marshal)
 	_, err := js.bucket.Put(escape(req.Key), bt)
 	return err
 }
 
 // Delete performs a delete operation.
-func (js *StateStore) Delete(req *state.DeleteRequest) error {
+func (js *StateStore) Delete(ctx context.Context, req *state.DeleteRequest) error {
 	return js.bucket.Delete(escape(req.Key))
 }
 
-func (js *StateStore) getMetadata(metadata state.Metadata) (jetstreamMetadata, error) {
+func (js *StateStore) getMetadata(meta state.Metadata) (jetstreamMetadata, error) {
 	var m jetstreamMetadata
-
-	if v, ok := metadata.Properties["natsURL"]; ok && v != "" {
-		m.natsURL = v
-	} else {
-		return jetstreamMetadata{}, fmt.Errorf("missing nats URL")
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
+	if err != nil {
+		return jetstreamMetadata{}, err
 	}
 
-	m.jwt = metadata.Properties["jwt"]
-	m.seedKey = metadata.Properties["seedKey"]
-
-	if m.jwt != "" && m.seedKey == "" {
-		return jetstreamMetadata{}, fmt.Errorf("missing seed key")
+	if m.NatsURL == "" {
+		return jetstreamMetadata{}, errors.New("missing nats URL")
 	}
 
-	if m.jwt == "" && m.seedKey != "" {
-		return jetstreamMetadata{}, fmt.Errorf("missing jwt")
+	if m.Jwt != "" && m.SeedKey == "" {
+		return jetstreamMetadata{}, errors.New("missing seed key")
 	}
 
-	if m.name = metadata.Properties["name"]; m.name == "" {
-		m.name = "dapr.io - statestore.jetstream"
+	if m.Jwt == "" && m.SeedKey != "" {
+		return jetstreamMetadata{}, errors.New("missing jwt")
 	}
 
-	if m.bucket = metadata.Properties["bucket"]; m.bucket == "" {
-		return jetstreamMetadata{}, fmt.Errorf("missing bucket")
+	if m.Name == "" {
+		m.Name = "dapr.io - statestore.jetstream"
+	}
+
+	if m.Bucket == "" {
+		return jetstreamMetadata{}, errors.New("missing bucket")
 	}
 
 	return m, nil
@@ -172,3 +173,18 @@ func sigHandler(seedKey string, nonce []byte) ([]byte, error) {
 func escape(key string) string {
 	return strings.ReplaceAll(key, "||", ".")
 }
+
+func (js *StateStore) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := jetstreamMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.StateStoreType)
+	return
+}
+
+func (js *StateStore) Close() error {
+	if js.closed.CompareAndSwap(false, true) && js.nc != nil {
+		js.nc.Close()
+	}
+	return nil
+}
+
+var _ io.Closer = (*StateStore)(nil)

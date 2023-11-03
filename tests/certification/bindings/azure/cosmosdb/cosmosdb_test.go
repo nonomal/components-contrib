@@ -17,19 +17,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 
-	"github.com/dapr/components-contrib/bindings"
 	cosmosdbbinding "github.com/dapr/components-contrib/bindings/azure/cosmosdb"
-	"github.com/dapr/components-contrib/secretstores"
 	secretstore_env "github.com/dapr/components-contrib/secretstores/local/env"
 	bindings_loader "github.com/dapr/dapr/pkg/components/bindings"
 	secretstores_loader "github.com/dapr/dapr/pkg/components/secretstores"
-	"github.com/dapr/dapr/pkg/runtime"
 	dapr_testing "github.com/dapr/dapr/pkg/testing"
 	daprsdk "github.com/dapr/go-sdk/client"
 	"github.com/dapr/kit/logger"
@@ -70,8 +68,6 @@ func TestCosmosDBBinding(t *testing.T) {
 
 	currentGRPCPort := ports[0]
 	currentHTTPPort := ports[1]
-
-	log := logger.NewLogger("dapr.components")
 
 	invokeCreateWithDocument := func(ctx flow.Context, document map[string]interface{}) error {
 		client, clientErr := daprsdk.NewClientWithPort(fmt.Sprint(currentGRPCPort))
@@ -188,20 +184,13 @@ func TestCosmosDBBinding(t *testing.T) {
 
 	flow.New(t, "cosmosdb binding authentication using service principal").
 		Step(sidecar.Run(sidecarName,
-			embedded.WithoutApp(),
-			embedded.WithComponentsPath("./components/serviceprincipal"),
-			embedded.WithDaprGRPCPort(currentGRPCPort),
-			embedded.WithDaprHTTPPort(currentHTTPPort),
-			runtime.WithSecretStores(
-				secretstores_loader.New("local.env", func() secretstores.SecretStore {
-					return secretstore_env.NewEnvSecretStore(log)
-				}),
-			),
-			runtime.WithOutputBindings(
-				bindings_loader.NewOutput("azure.cosmosdb", func() bindings.OutputBinding {
-					return cosmosdbbinding.NewCosmosDB(log)
-				}),
-			))).
+			append(componentRuntimeOptions(),
+				embedded.WithoutApp(),
+				embedded.WithComponentsPath("./components/serviceprincipal"),
+				embedded.WithDaprGRPCPort(strconv.Itoa(currentGRPCPort)),
+				embedded.WithDaprHTTPPort(strconv.Itoa(currentHTTPPort)),
+			)...,
+		)).
 		Run()
 
 	ports, err = dapr_testing.GetFreePorts(2)
@@ -212,20 +201,13 @@ func TestCosmosDBBinding(t *testing.T) {
 
 	flow.New(t, "cosmosdb binding authentication using master key").
 		Step(sidecar.Run(sidecarName,
-			embedded.WithoutApp(),
-			embedded.WithComponentsPath("./components/masterkey"),
-			embedded.WithDaprGRPCPort(currentGRPCPort),
-			embedded.WithDaprHTTPPort(currentHTTPPort),
-			runtime.WithSecretStores(
-				secretstores_loader.New("local.env", func() secretstores.SecretStore {
-					return secretstore_env.NewEnvSecretStore(log)
-				}),
-			),
-			runtime.WithOutputBindings(
-				bindings_loader.NewOutput("azure.cosmosdb", func() bindings.OutputBinding {
-					return cosmosdbbinding.NewCosmosDB(log)
-				}),
-			))).
+			append(componentRuntimeOptions(),
+				embedded.WithoutApp(),
+				embedded.WithComponentsPath("./components/masterkey"),
+				embedded.WithDaprGRPCPort(strconv.Itoa(currentGRPCPort)),
+				embedded.WithDaprHTTPPort(strconv.Itoa(currentHTTPPort)),
+			)...,
+		)).
 		Step("verify data sent to output binding is written to Cosmos DB", testInvokeCreateAndVerify).
 		Step("expect error if id is missing from document", testInvokeCreateWithoutID).
 		Step("expect error if partition key is missing from document", testInvokeCreateWithoutPartitionKey).
@@ -239,20 +221,30 @@ func TestCosmosDBBinding(t *testing.T) {
 
 	flow.New(t, "cosmosdb binding with wrong partition key specified").
 		Step(sidecar.Run(sidecarName,
-			embedded.WithoutApp(),
-			embedded.WithComponentsPath("./components/wrongPartitionKey"),
-			embedded.WithDaprGRPCPort(currentGRPCPort),
-			embedded.WithDaprHTTPPort(currentHTTPPort),
-			runtime.WithSecretStores(
-				secretstores_loader.New("local.env", func() secretstores.SecretStore {
-					return secretstore_env.NewEnvSecretStore(log)
-				}),
-			),
-			runtime.WithOutputBindings(
-				bindings_loader.NewOutput("azure.cosmosdb", func() bindings.OutputBinding {
-					return cosmosdbbinding.NewCosmosDB(log)
-				}),
-			))).
+			append(componentRuntimeOptions(),
+				embedded.WithoutApp(),
+				embedded.WithComponentsPath("./components/wrongPartitionKey"),
+				embedded.WithDaprGRPCPort(strconv.Itoa(currentGRPCPort)),
+				embedded.WithDaprHTTPPort(strconv.Itoa(currentHTTPPort)),
+			)...,
+		)).
 		Step("verify error when wrong partition key used", testInvokeCreateWithWrongPartitionKey).
 		Run()
+}
+
+func componentRuntimeOptions() []embedded.Option {
+	log := logger.NewLogger("dapr.components")
+
+	bindingsRegistry := bindings_loader.NewRegistry()
+	bindingsRegistry.Logger = log
+	bindingsRegistry.RegisterOutputBinding(cosmosdbbinding.NewCosmosDB, "azure.cosmosdb")
+
+	secretstoreRegistry := secretstores_loader.NewRegistry()
+	secretstoreRegistry.Logger = log
+	secretstoreRegistry.RegisterComponent(secretstore_env.NewEnvSecretStore, "local.env")
+
+	return []embedded.Option{
+		embedded.WithBindings(bindingsRegistry),
+		embedded.WithSecretStores(secretstoreRegistry),
+	}
 }

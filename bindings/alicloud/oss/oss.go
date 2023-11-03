@@ -16,13 +16,15 @@ package oss
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"reflect"
 
 	"github.com/aliyun/aliyun-oss-go-sdk/oss"
 	"github.com/google/uuid"
 
 	"github.com/dapr/components-contrib/bindings"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 // AliCloudOSS is a binding for an AliCloud OSS storage bucket.
@@ -33,19 +35,19 @@ type AliCloudOSS struct {
 }
 
 type ossMetadata struct {
-	Endpoint    string `json:"endpoint"`
-	AccessKeyID string `json:"accessKeyID"`
-	AccessKey   string `json:"accessKey"`
-	Bucket      string `json:"bucket"`
+	Endpoint    string `json:"endpoint" mapstructure:"endpoint"`
+	AccessKeyID string `json:"accessKeyID" mapstructure:"accessKeyID"`
+	AccessKey   string `json:"accessKey" mapstructure:"accessKey"`
+	Bucket      string `json:"bucket" mapstructure:"bucket"`
 }
 
 // NewAliCloudOSS returns a new  instance.
-func NewAliCloudOSS(logger logger.Logger) *AliCloudOSS {
+func NewAliCloudOSS(logger logger.Logger) bindings.OutputBinding {
 	return &AliCloudOSS{logger: logger}
 }
 
 // Init does metadata parsing and connection creation.
-func (s *AliCloudOSS) Init(metadata bindings.Metadata) error {
+func (s *AliCloudOSS) Init(_ context.Context, metadata bindings.Metadata) error {
 	m, err := s.parseMetadata(metadata)
 	if err != nil {
 		return err
@@ -64,7 +66,7 @@ func (s *AliCloudOSS) Operations() []bindings.OperationKind {
 	return []bindings.OperationKind{bindings.CreateOperation}
 }
 
-func (s *AliCloudOSS) Invoke(ctx context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
+func (s *AliCloudOSS) Invoke(_ context.Context, req *bindings.InvokeRequest) (*bindings.InvokeResponse, error) {
 	key := ""
 	if val, ok := req.Metadata["key"]; ok && val != "" {
 		key = val
@@ -87,14 +89,9 @@ func (s *AliCloudOSS) Invoke(ctx context.Context, req *bindings.InvokeRequest) (
 	return nil, err
 }
 
-func (s *AliCloudOSS) parseMetadata(metadata bindings.Metadata) (*ossMetadata, error) {
-	b, err := json.Marshal(metadata.Properties)
-	if err != nil {
-		return nil, err
-	}
-
+func (s *AliCloudOSS) parseMetadata(meta bindings.Metadata) (*ossMetadata, error) {
 	var m ossMetadata
-	err = json.Unmarshal(b, &m)
+	err := kitmd.DecodeMetadata(meta.Properties, &m)
 	if err != nil {
 		return nil, err
 	}
@@ -109,4 +106,11 @@ func (s *AliCloudOSS) getClient(metadata *ossMetadata) (*oss.Client, error) {
 	}
 
 	return client, nil
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (s *AliCloudOSS) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	metadataStruct := ossMetadata{}
+	metadata.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, metadata.BindingType)
+	return
 }

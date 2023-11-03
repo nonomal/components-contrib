@@ -15,7 +15,7 @@ package utils
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +30,6 @@ import (
 type CommonConfig struct {
 	ComponentType string
 	ComponentName string
-	AllOperations bool
 	Operations    map[string]struct{}
 }
 
@@ -38,18 +37,14 @@ type server struct {
 	Data []byte
 }
 
-// nolint:gochecknoglobals
+//nolint:gochecknoglobals
 var (
 	s          server
 	testLogger = logger.NewLogger("utils")
 )
 
 func (cc CommonConfig) HasOperation(operation string) bool {
-	if cc.AllOperations {
-		return true
-	}
 	_, exists := cc.Operations[operation]
-
 	return exists
 }
 
@@ -58,7 +53,6 @@ func (cc CommonConfig) CopyMap(config map[string]string) map[string]string {
 	for k, v := range config {
 		m[k] = v
 	}
-
 	return m
 }
 
@@ -104,9 +98,9 @@ func appRouter() *mux.Router {
 
 func handleCall(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
-	case "POST":
+	case http.MethodPost:
 		s.handlePost(r)
-	case "GET":
+	case http.MethodGet:
 		w.Write(s.handleGet())
 	default:
 		w.WriteHeader(http.StatusInternalServerError)
@@ -118,7 +112,7 @@ func (s *server) handleGet() []byte {
 }
 
 func (s *server) handlePost(r *http.Request) {
-	data, err := ioutil.ReadAll(r.Body)
+	data, err := io.ReadAll(r.Body)
 	defer r.Body.Close()
 
 	if err == nil {

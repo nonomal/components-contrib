@@ -15,67 +15,108 @@ package jetstream
 
 import (
 	"fmt"
-	"strconv"
 	"time"
 
+	"github.com/nats-io/nats.go"
+
 	"github.com/dapr/components-contrib/pubsub"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 type metadata struct {
-	natsURL string
-	jwt     string
-	seedKey string
+	NatsURL string `mapstructure:"natsURL"`
 
-	name           string
-	durableName    string
-	queueGroupName string
-	startSequence  uint64
-	startTime      time.Time
-	deliverAll     bool
-	flowControl    bool
+	Jwt     string `mapstructure:"jwt"`
+	SeedKey string `mapstructure:"seedKey"`
+	Token   string `mapstructure:"token"`
+
+	TLSClientCert string `mapstructure:"tls_client_cert"`
+	TLSClientKey  string `mapstructure:"tls_client_key"`
+
+	Name                  string             `mapstructure:"name"`
+	StreamName            string             `mapstructure:"streamName"`
+	DurableName           string             `mapstructure:"durableName"`
+	QueueGroupName        string             `mapstructure:"queueGroupName"`
+	StartSequence         uint64             `mapstructure:"startSequence"`
+	StartTime             *uint64            `mapstructure:"startTime"`
+	internalStartTime     time.Time          `mapstructure:"-"`
+	FlowControl           bool               `mapstructure:"flowControl"`
+	AckWait               time.Duration      `mapstructure:"ackWait"`
+	MaxDeliver            int                `mapstructure:"maxDeliver"`
+	BackOff               []time.Duration    `mapstructure:"backOff"`
+	MaxAckPending         int                `mapstructure:"maxAckPending"`
+	Replicas              int                `mapstructure:"replicas"`
+	MemoryStorage         bool               `mapstructure:"memoryStorage"`
+	RateLimit             uint64             `mapstructure:"rateLimit"`
+	Heartbeat             time.Duration      `mapstructure:"heartbeat"`
+	DeliverPolicy         string             `mapstructure:"deliverPolicy"`
+	internalDeliverPolicy nats.DeliverPolicy `mapstructure:"-"`
+	AckPolicy             string             `mapstructure:"ackPolicy"`
+	internalAckPolicy     nats.AckPolicy     `mapstructure:"-"`
+	Domain                string             `mapstructure:"domain"`
+	APIPrefix             string             `mapstructure:"apiPrefix"`
 }
 
 func parseMetadata(psm pubsub.Metadata) (metadata, error) {
 	var m metadata
 
-	if v, ok := psm.Properties["natsURL"]; ok && v != "" {
-		m.natsURL = v
-	} else {
+	err := kitmd.DecodeMetadata(psm.Properties, &m)
+	if err != nil {
+		return metadata{}, err
+	}
+
+	if m.NatsURL == "" {
 		return metadata{}, fmt.Errorf("missing nats URL")
 	}
 
-	m.jwt = psm.Properties["jwt"]
-	m.seedKey = psm.Properties["seedKey"]
-
-	if m.jwt != "" && m.seedKey == "" {
+	if m.Jwt != "" && m.SeedKey == "" {
 		return metadata{}, fmt.Errorf("missing seed key")
 	}
 
-	if m.jwt == "" && m.seedKey != "" {
+	if m.Jwt == "" && m.SeedKey != "" {
 		return metadata{}, fmt.Errorf("missing jwt")
 	}
 
-	if m.name = psm.Properties["name"]; m.name == "" {
-		m.name = "dapr.io - pubsub.jetstream"
+	if m.TLSClientCert != "" && m.TLSClientKey == "" {
+		return metadata{}, fmt.Errorf("missing tls client key")
 	}
 
-	m.durableName = psm.Properties["durableName"]
-	m.queueGroupName = psm.Properties["queueGroupName"]
-
-	if v, err := strconv.ParseUint(psm.Properties["startSequence"], 10, 64); err == nil {
-		m.startSequence = v
+	if m.TLSClientCert == "" && m.TLSClientKey != "" {
+		return metadata{}, fmt.Errorf("missing tls client cert")
 	}
 
-	if v, err := strconv.ParseInt(psm.Properties["startTime"], 10, 64); err == nil {
-		m.startTime = time.Unix(v, 0)
+	if m.Name == "" {
+		m.Name = "dapr.io - pubsub.jetstream"
 	}
 
-	if v, err := strconv.ParseBool(psm.Properties["deliverAll"]); err == nil {
-		m.deliverAll = v
+	if m.StartTime != nil {
+		m.internalStartTime = time.Unix(int64(*m.StartTime), 0)
 	}
 
-	if v, err := strconv.ParseBool(psm.Properties["flowControl"]); err == nil {
-		m.flowControl = v
+	switch m.DeliverPolicy {
+	case "all", "":
+		m.internalDeliverPolicy = nats.DeliverAllPolicy
+	case "last":
+		m.internalDeliverPolicy = nats.DeliverLastPolicy
+	case "new":
+		m.internalDeliverPolicy = nats.DeliverNewPolicy
+	case "sequence":
+		m.internalDeliverPolicy = nats.DeliverByStartSequencePolicy
+	case "time":
+		m.internalDeliverPolicy = nats.DeliverByStartTimePolicy
+	default:
+		return metadata{}, fmt.Errorf("deliver policy %s is not one of: all, last, new, sequence, time", m.DeliverPolicy)
+	}
+
+	switch m.AckPolicy {
+	case "explicit":
+		m.internalAckPolicy = nats.AckExplicitPolicy
+	case "all":
+		m.internalAckPolicy = nats.AckAllPolicy
+	case "none":
+		m.internalAckPolicy = nats.AckNonePolicy
+	default:
+		m.internalAckPolicy = nats.AckExplicitPolicy
 	}
 
 	return m, nil

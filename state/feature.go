@@ -1,5 +1,5 @@
 /*
-Copyright 2021 The Dapr Authors
+Copyright 2023 The Dapr Authors
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
@@ -13,23 +13,25 @@ limitations under the License.
 
 package state
 
+import (
+	"golang.org/x/exp/slices"
+)
+
 const (
 	// FeatureETag is the feature to etag metadata in state store.
 	FeatureETag Feature = "ETAG"
 	// FeatureTransactional is the feature that performs transactional operations.
 	FeatureTransactional Feature = "TRANSACTIONAL"
+	// FeatureQueryAPI is the feature that performs query operations.
+	FeatureQueryAPI Feature = "QUERY_API"
+	// FeatureTTL is the feature that supports TTLs.
+	FeatureTTL Feature = "TTL"
 )
 
-// Feature names a feature that can be implemented by PubSub components.
+// Feature names a feature that can be implemented by state store components.
 type Feature string
 
 // IsPresent checks if a given feature is present in the list.
 func (f Feature) IsPresent(features []Feature) bool {
-	for _, feature := range features {
-		if feature == f {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(features, f)
 }

@@ -19,14 +19,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/commands"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/entities"
-	"github.com/camunda-cloud/zeebe/clients/go/pkg/zbc"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/commands"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/entities"
+	"github.com/camunda/zeebe/clients/go/v8/pkg/zbc"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/dapr/components-contrib/bindings"
-	contrib_metadata "github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/kit/logger"
+	kitmd "github.com/dapr/kit/metadata"
 )
 
 type mockActivateJobsClient struct {
@@ -144,7 +144,7 @@ func TestActivateJobs(t *testing.T) {
 		payload := activateJobsPayload{
 			JobType:           "a",
 			MaxJobsToActivate: new(int32),
-			Timeout:           contrib_metadata.Duration{Duration: 1 * time.Second},
+			Timeout:           kitmd.Duration{Duration: 1 * time.Second},
 			WorkerName:        "b",
 			FetchVariables:    []string{"a", "b", "c"},
 		}

@@ -16,18 +16,23 @@ package kubernetes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
-	kubeclient "github.com/dapr/components-contrib/authentication/kubernetes"
+	kubeclient "github.com/dapr/components-contrib/internal/authentication/kubernetes"
+	"github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/secretstores"
 	"github.com/dapr/kit/logger"
 )
 
+var _ secretstores.SecretStore = (*kubernetesSecretStore)(nil)
+
 type kubernetesSecretStore struct {
 	kubeClient kubernetes.Interface
+	md         kubernetesMetadata
 	logger     logger.Logger
 }
 
@@ -37,18 +42,28 @@ func NewKubernetesSecretStore(logger logger.Logger) secretstores.SecretStore {
 }
 
 // Init creates a Kubernetes client.
-func (k *kubernetesSecretStore) Init(metadata secretstores.Metadata) error {
-	client, err := kubeclient.GetKubeClient()
+func (k *kubernetesSecretStore) Init(_ context.Context, metadata secretstores.Metadata) error {
+	// Init metadata
+	err := k.md.InitWithMetadata(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to load metadata: %w", err)
+	}
+
+	// Init Kubernetes client
+	kubeconfigPath := k.md.KubeconfigPath
+	if kubeconfigPath == "" {
+		kubeconfigPath = kubeclient.GetKubeconfigPath(k.logger, os.Args)
+	}
+	k.kubeClient, err = kubeclient.GetKubeClient(kubeconfigPath)
 	if err != nil {
 		return err
 	}
-	k.kubeClient = client
 
 	return nil
 }
 
 // GetSecret retrieves a secret using a key and returns a map of decrypted string/string values.
-func (k *kubernetesSecretStore) GetSecret(req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
+func (k *kubernetesSecretStore) GetSecret(ctx context.Context, req secretstores.GetSecretRequest) (secretstores.GetSecretResponse, error) {
 	resp := secretstores.GetSecretResponse{
 		Data: map[string]string{},
 	}
@@ -57,7 +72,7 @@ func (k *kubernetesSecretStore) GetSecret(req secretstores.GetSecretRequest) (se
 		return resp, err
 	}
 
-	secret, err := k.kubeClient.CoreV1().Secrets(namespace).Get(context.TODO(), req.Name, meta_v1.GetOptions{})
+	secret, err := k.kubeClient.CoreV1().Secrets(namespace).Get(ctx, req.Name, metav1.GetOptions{})
 	if err != nil {
 		return resp, err
 	}
@@ -70,7 +85,7 @@ func (k *kubernetesSecretStore) GetSecret(req secretstores.GetSecretRequest) (se
 }
 
 // BulkGetSecret retrieves all secrets in the store and returns a map of decrypted string/string values.
-func (k *kubernetesSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
+func (k *kubernetesSecretStore) BulkGetSecret(ctx context.Context, req secretstores.BulkGetSecretRequest) (secretstores.BulkGetSecretResponse, error) {
 	resp := secretstores.BulkGetSecretResponse{
 		Data: map[string]map[string]string{},
 	}
@@ -79,7 +94,7 @@ func (k *kubernetesSecretStore) BulkGetSecret(req secretstores.BulkGetSecretRequ
 		return resp, err
 	}
 
-	secrets, err := k.kubeClient.CoreV1().Secrets(namespace).List(context.TODO(), meta_v1.ListOptions{})
+	secrets, err := k.kubeClient.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return resp, err
 	}
@@ -99,10 +114,23 @@ func (k *kubernetesSecretStore) getNamespaceFromMetadata(metadata map[string]str
 		return val, nil
 	}
 
-	val := os.Getenv("NAMESPACE")
-	if val != "" {
+	if val := os.Getenv("NAMESPACE"); val != "" {
 		return val, nil
 	}
 
-	return "", errors.New("namespace is missing on metadata and NAMESPACE env variable")
+	if k.md.DefaultNamespace != "" {
+		return k.md.DefaultNamespace, nil
+	}
+
+	return "", errors.New("namespace is missing on metadata and NAMESPACE env variable, and no default namespace is set")
+}
+
+// Features returns the features available in this secret store.
+func (k *kubernetesSecretStore) Features() []secretstores.Feature {
+	return []secretstores.Feature{}
+}
+
+func (k *kubernetesSecretStore) GetComponentMetadata() (metadataInfo metadata.MetadataMap) {
+	// No component metadata
+	return
 }

@@ -16,11 +16,14 @@ package jetstream
 import (
 	"context"
 	"errors"
-	"time"
+	"reflect"
+	"sync"
+	"sync/atomic"
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nkeys"
 
+	mdutils "github.com/dapr/components-contrib/metadata"
 	"github.com/dapr/components-contrib/pubsub"
 	"github.com/dapr/kit/logger"
 	"github.com/dapr/kit/retry"
@@ -32,16 +35,21 @@ type jetstreamPubSub struct {
 	l    logger.Logger
 	meta metadata
 
-	ctx           context.Context
-	ctxCancel     context.CancelFunc
 	backOffConfig retry.Config
+
+	closed  atomic.Bool
+	closeCh chan struct{}
+	wg      sync.WaitGroup
 }
 
 func NewJetStream(logger logger.Logger) pubsub.PubSub {
-	return &jetstreamPubSub{l: logger}
+	return &jetstreamPubSub{
+		l:       logger,
+		closeCh: make(chan struct{}),
+	}
 }
 
-func (js *jetstreamPubSub) Init(metadata pubsub.Metadata) error {
+func (js *jetstreamPubSub) Init(_ context.Context, metadata pubsub.Metadata) error {
 	var err error
 	js.meta, err = parseMetadata(metadata)
 	if err != nil {
@@ -49,29 +57,43 @@ func (js *jetstreamPubSub) Init(metadata pubsub.Metadata) error {
 	}
 
 	var opts []nats.Option
-	opts = append(opts, nats.Name(js.meta.name))
+	opts = append(opts, nats.Name(js.meta.Name))
 
 	// Set nats.UserJWT options when jwt and seed key is provided.
-	if js.meta.jwt != "" && js.meta.seedKey != "" {
+	if js.meta.Jwt != "" && js.meta.SeedKey != "" {
 		opts = append(opts, nats.UserJWT(func() (string, error) {
-			return js.meta.jwt, nil
+			return js.meta.Jwt, nil
 		}, func(nonce []byte) ([]byte, error) {
-			return sigHandler(js.meta.seedKey, nonce)
+			return sigHandler(js.meta.SeedKey, nonce)
 		}))
+	} else if js.meta.TLSClientCert != "" && js.meta.TLSClientKey != "" {
+		js.l.Debug("Configure nats for tls client authentication")
+		opts = append(opts, nats.ClientCert(js.meta.TLSClientCert, js.meta.TLSClientKey))
+	} else if js.meta.Token != "" {
+		js.l.Debug("Configure nats for token authentication")
+		opts = append(opts, nats.Token(js.meta.Token))
 	}
 
-	js.nc, err = nats.Connect(js.meta.natsURL, opts...)
+	js.nc, err = nats.Connect(js.meta.NatsURL, opts...)
 	if err != nil {
 		return err
 	}
-	js.l.Debugf("Connected to nats at %s", js.meta.natsURL)
+	js.l.Debugf("Connected to nats at %s", js.meta.NatsURL)
 
-	js.jsc, err = js.nc.JetStream()
+	jsOpts := []nats.JSOpt{}
+
+	if js.meta.Domain != "" {
+		jsOpts = append(jsOpts, nats.Domain(js.meta.Domain))
+	}
+
+	if js.meta.APIPrefix != "" {
+		jsOpts = append(jsOpts, nats.APIPrefix(js.meta.APIPrefix))
+	}
+
+	js.jsc, err = js.nc.JetStream(jsOpts...)
 	if err != nil {
 		return err
 	}
-
-	js.ctx, js.ctxCancel = context.WithCancel(context.Background())
 
 	// Default retry configuration is used if no backOff properties are set.
 	if err := retry.DecodeConfigWithPrefix(
@@ -90,33 +112,88 @@ func (js *jetstreamPubSub) Features() []pubsub.Feature {
 	return nil
 }
 
-func (js *jetstreamPubSub) Publish(req *pubsub.PublishRequest) error {
-	js.l.Debugf("Publishing topic %v with data: %v", req.Topic, req.Data)
-	_, err := js.jsc.Publish(req.Topic, req.Data)
+func (js *jetstreamPubSub) Publish(ctx context.Context, req *pubsub.PublishRequest) error {
+	if js.closed.Load() {
+		return errors.New("component is closed")
+	}
+
+	var opts []nats.PubOpt
+	var msgID string
+
+	event, err := pubsub.FromCloudEvent(req.Data, "", "", "", "")
+	if err != nil {
+		js.l.Debugf("error unmarshalling cloudevent: %v", err)
+	} else {
+		// Use the cloudevent id as the Nats-MsgId for deduplication
+		if id, ok := event["id"].(string); ok {
+			msgID = id
+			opts = append(opts, nats.MsgId(msgID))
+		}
+	}
+
+	if msgID == "" {
+		js.l.Warn("empty message ID, Jetstream deduplication will not be possible")
+	}
+
+	js.l.Debugf("Publishing to topic %v id: %s", req.Topic, msgID)
+	_, err = js.jsc.Publish(req.Topic, req.Data, opts...)
 
 	return err
 }
 
-func (js *jetstreamPubSub) Subscribe(req pubsub.SubscribeRequest, handler pubsub.Handler) error {
-	var opts []nats.SubOpt
-
-	if v := js.meta.durableName; v != "" {
-		opts = append(opts, nats.Durable(v))
+func (js *jetstreamPubSub) Subscribe(ctx context.Context, req pubsub.SubscribeRequest, handler pubsub.Handler) error {
+	if js.closed.Load() {
+		return errors.New("component is closed")
 	}
 
-	if v := js.meta.startTime; !v.IsZero() {
-		opts = append(opts, nats.StartTime(v))
-	} else if v := js.meta.startSequence; v > 0 {
-		opts = append(opts, nats.StartSequence(v))
-	} else if js.meta.deliverAll {
-		opts = append(opts, nats.DeliverAll())
-	} else {
-		opts = append(opts, nats.DeliverLast())
+	var consumerConfig nats.ConsumerConfig
+
+	consumerConfig.DeliverSubject = nats.NewInbox()
+
+	if v := js.meta.DurableName; v != "" {
+		consumerConfig.Durable = v
+	}
+	if v := js.meta.QueueGroupName; v != "" {
+		consumerConfig.DeliverGroup = v
 	}
 
-	if js.meta.flowControl {
-		opts = append(opts, nats.EnableFlowControl())
+	if v := js.meta.internalStartTime; !v.IsZero() {
+		consumerConfig.OptStartTime = &v
 	}
+	if v := js.meta.StartSequence; v > 0 {
+		consumerConfig.OptStartSeq = v
+	}
+	consumerConfig.DeliverPolicy = js.meta.internalDeliverPolicy
+	if js.meta.FlowControl {
+		consumerConfig.FlowControl = true
+	}
+
+	if js.meta.AckWait != 0 {
+		consumerConfig.AckWait = js.meta.AckWait
+	}
+	if js.meta.MaxDeliver != 0 {
+		consumerConfig.MaxDeliver = js.meta.MaxDeliver
+	}
+	if len(js.meta.BackOff) != 0 {
+		consumerConfig.BackOff = js.meta.BackOff
+	}
+	if js.meta.MaxAckPending != 0 {
+		consumerConfig.MaxAckPending = js.meta.MaxAckPending
+	}
+	if js.meta.Replicas != 0 {
+		consumerConfig.Replicas = js.meta.Replicas
+	}
+	if js.meta.MemoryStorage {
+		consumerConfig.MemoryStorage = true
+	}
+	if js.meta.RateLimit != 0 {
+		consumerConfig.RateLimit = js.meta.RateLimit
+	}
+	if js.meta.Heartbeat != 0 {
+		consumerConfig.Heartbeat = js.meta.Heartbeat
+	}
+	consumerConfig.AckPolicy = js.meta.internalAckPolicy
+	consumerConfig.FilterSubject = req.Topic
 
 	natsHandler := func(m *nats.Msg) {
 		jsm, err := m.Metadata()
@@ -128,55 +205,88 @@ func (js *jetstreamPubSub) Subscribe(req pubsub.SubscribeRequest, handler pubsub
 			return
 		}
 
-		operation := func() error {
-			js.l.Debugf("Processing JetStream message %s/%d", m.Subject,
-				jsm.Sequence)
-			opErr := handler(js.ctx, &pubsub.NewMessage{
-				Topic: req.Topic,
-				Data:  m.Data,
-				Metadata: map[string]string{
-					"Topic": m.Subject,
-				},
-			})
-			if opErr != nil {
-				return opErr
+		js.l.Debugf("Processing JetStream message %s/%d", m.Subject, jsm.Sequence)
+		err = handler(ctx, &pubsub.NewMessage{
+			Topic: req.Topic,
+			Data:  m.Data,
+			Metadata: map[string]string{
+				"Topic": m.Subject,
+			},
+		})
+		if err != nil {
+			js.l.Errorf("Error processing JetStream message %s/%d: %v", m.Subject, jsm.Sequence, err)
+
+			if js.meta.internalAckPolicy == nats.AckExplicitPolicy || js.meta.internalAckPolicy == nats.AckAllPolicy {
+				var nakErr error
+				if js.meta.AckWait != 0 {
+					nakErr = m.NakWithDelay(js.meta.AckWait)
+				} else {
+					nakErr = m.Nak()
+				}
+				if nakErr != nil {
+					js.l.Errorf("Error while sending NAK for JetStream message %s/%d: %v", m.Subject, jsm.Sequence, nakErr)
+				}
 			}
 
-			return m.Ack()
+			return
 		}
-		notify := func(nerr error, d time.Duration) {
-			js.l.Errorf("Error processing JetStream message: %s/%d. Retrying...",
-				m.Subject, jsm.Sequence)
-		}
-		recovered := func() {
-			js.l.Infof("Successfully processed JetStream message after it previously failed: %s/%d",
-				m.Subject, jsm.Sequence)
-		}
-		backOff := js.backOffConfig.NewBackOffWithContext(js.ctx)
 
-		err = retry.NotifyRecover(operation, backOff, notify, recovered)
-		if err != nil && !errors.Is(err, context.Canceled) {
-			js.l.Errorf("Error processing message and retries are exhausted:  %s/%d.",
-				m.Subject, jsm.Sequence)
+		if js.meta.internalAckPolicy == nats.AckExplicitPolicy || js.meta.internalAckPolicy == nats.AckAllPolicy {
+			err = m.Ack()
+			if err != nil {
+				js.l.Errorf("Error while sending ACK for JetStream message %s/%d: %v", m.Subject, jsm.Sequence, err)
+			}
 		}
 	}
 
 	var err error
-	if queue := js.meta.queueGroupName; queue != "" {
-		js.l.Debugf("nats: subscribed to subject %s with queue group %s",
-			req.Topic, js.meta.queueGroupName)
-		_, err = js.jsc.QueueSubscribe(req.Topic, queue, natsHandler, opts...)
-	} else {
-		js.l.Debugf("nats: subscribed to subject %s", req.Topic)
-		_, err = js.jsc.Subscribe(req.Topic, natsHandler, opts...)
+	streamName := js.meta.StreamName
+	if streamName == "" {
+		streamName, err = js.jsc.StreamNameBySubject(req.Topic)
+		if err != nil {
+			return err
+		}
+	}
+	var subscription *nats.Subscription
+
+	consumerInfo, err := js.jsc.AddConsumer(streamName, &consumerConfig)
+	if err != nil {
+		return err
 	}
 
-	return err
+	if queue := js.meta.QueueGroupName; queue != "" {
+		js.l.Debugf("nats: subscribed to subject %s with queue group %s",
+			req.Topic, js.meta.QueueGroupName)
+		subscription, err = js.jsc.QueueSubscribe(req.Topic, queue, natsHandler, nats.Bind(streamName, consumerInfo.Name))
+	} else {
+		js.l.Debugf("nats: subscribed to subject %s", req.Topic)
+		subscription, err = js.jsc.Subscribe(req.Topic, natsHandler, nats.Bind(streamName, consumerInfo.Name))
+	}
+	if err != nil {
+		return err
+	}
+
+	js.wg.Add(1)
+	go func() {
+		defer js.wg.Done()
+		select {
+		case <-ctx.Done():
+		case <-js.closeCh:
+		}
+		err := subscription.Unsubscribe()
+		if err != nil {
+			js.l.Warnf("nats: error while unsubscribing from topic %s: %v", req.Topic, err)
+		}
+	}()
+
+	return nil
 }
 
 func (js *jetstreamPubSub) Close() error {
-	js.ctxCancel()
-
+	defer js.wg.Wait()
+	if js.closed.CompareAndSwap(false, true) {
+		close(js.closeCh)
+	}
 	return js.nc.Drain()
 }
 
@@ -191,4 +301,11 @@ func sigHandler(seedKey string, nonce []byte) ([]byte, error) {
 
 	sig, _ := kp.Sign(nonce)
 	return sig, nil
+}
+
+// GetComponentMetadata returns the metadata of the component.
+func (js *jetstreamPubSub) GetComponentMetadata() (metadataInfo mdutils.MetadataMap) {
+	metadataStruct := metadata{}
+	mdutils.GetMetadataInfoFromStructType(reflect.TypeOf(metadataStruct), &metadataInfo, mdutils.PubSubType)
+	return
 }

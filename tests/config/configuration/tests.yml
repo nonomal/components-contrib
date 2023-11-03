@@ -1,0 +1,11 @@
+# Supported additional operation: (none)
+componentType: configuration
+components:
+  - component: redis.v6
+    operations: []
+  - component: redis.v7
+    operations: []
+  - component: postgresql.azure
+    operations: []
+  - component: postgresql.docker
+    operations: []
